@@ -187,7 +187,10 @@ async def _persist_failure_summary(call_id: uuid.UUID, reason: str) -> None:
         if summary is None:
             summary = CallSummary(call_id=call_id)
             session.add(summary)
-        summary.summary = f"Analysis failed: {reason}"
+        summary.summary = (
+            "AI summary could not be generated. The lead status and follow-up shown are "
+            f"the agent's own end-of-call assessment. ({reason})"
+        )
         await session.commit()
 
 
@@ -226,12 +229,13 @@ async def post_call_processing(call_id: uuid.UUID) -> None:
             logger.info("Call %s: analysis persisted (attempt %d)", call_id, attempt)
             return
         except Exception as exc:  # noqa: BLE001 - retry+record any SDK/validation failure
-            last_error = exc
+            last_error = exc if str(exc) else RuntimeError(type(exc).__name__)
             logger.warning("Call %s: analysis attempt %d failed: %s", call_id, attempt, exc)
 
     logger.error("Call %s: analysis failed after retry: %s", call_id, last_error)
-    await events_service.record(call_id, "analysis_failed", str(last_error)[:500])
+    reason = f"{type(last_error).__name__}: {last_error}"[:500]
+    await events_service.record(call_id, "analysis_failed", reason)
     try:
-        await _persist_failure_summary(call_id, str(last_error))
+        await _persist_failure_summary(call_id, reason)
     except Exception:
         logger.exception("Call %s: failed to persist failure summary", call_id)

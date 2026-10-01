@@ -25,7 +25,7 @@ from audiocall.db.models import Call, CallSummary, Customer
 from audiocall.db.session import get_session_factory
 from audiocall.phone import is_valid_e164
 from audiocall.services import events_service, profiles_service
-from audiocall.services.outcome import outcome_from_status
+from audiocall.services.outcome import outcome_from_analysis, outcome_from_status
 
 logger = logging.getLogger(__name__)
 
@@ -243,12 +243,24 @@ async def mark_stream_ended(
     _schedule_analysis(call_id)
 
 
-async def set_outcome(call_id: uuid.UUID, outcome: str) -> None:
+async def record_agent_assessment(
+    call_id: uuid.UUID, lead_status: str | None, follow_up: bool | None
+) -> None:
+    """The agent's own end-of-call verdict (from its `end_call` tool). Sets the
+    outcome and a preliminary lead status / follow-up flag, which post-call
+    analysis then refines — and which remain if that analysis fails."""
     async with get_session_factory()() as session:
         call = await session.get(Call, call_id)
         if call is None:
             return
-        call.outcome = outcome
+        call.outcome = outcome_from_analysis(lead_status)
+        summary = await session.scalar(select(CallSummary).where(CallSummary.call_id == call_id))
+        if summary is None:
+            summary = CallSummary(call_id=call_id)
+            session.add(summary)
+        if summary.summary is None:  # analysis hasn't run yet
+            summary.lead_status = lead_status
+            summary.follow_up = follow_up
         await session.commit()
 
 
@@ -488,9 +500,19 @@ async def load_call_context(call_id: uuid.UUID) -> dict | None:
             if row is not None:
                 row.profile_id = profile.id
                 await session.commit()
+    known_name = customer.name if customer.name != "Unknown caller" else None
+    # Facts the dashboard already holds count as collected from the start, so
+    # the agent confirms rather than asks for them.
+    field_keys = {f["key"] for f in profile.fields}
+    prefilled = {
+        key: value
+        for key, value in (("customer_name", known_name), ("company_name", customer.company))
+        if value and key in field_keys
+    }
     return {
+        "collected": prefilled,
         "customer": {
-            "name": customer.name if customer.name != "Unknown caller" else None,
+            "name": known_name,
             "company": customer.company,
             "purpose": customer.purpose,
             "product": customer.product,

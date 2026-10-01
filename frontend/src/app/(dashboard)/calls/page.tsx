@@ -2,18 +2,18 @@ import Link from "next/link";
 import type { Metadata } from "next";
 import { PageShell } from "@/components/layout/PageShell";
 import { CallsFilterBar } from "@/components/sections/CallsFilterBar";
-import { CallStatusBadge, LeadStatusBadge } from "@/components/ui/Badge";
+import { CallStatusBadge, ChannelBadge, LeadStatusBadge, OutcomeBadge } from "@/components/ui/Badge";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import { EmptyState, ErrorState } from "@/components/ui/States";
 import { ApiError, type CallListFilters } from "@/lib/apiClient";
 import { redirectIfUnauthenticated } from "@/lib/auth";
 import { getServerApiClient } from "@/lib/serverApiClient";
-import { formatDateTime, formatDuration } from "@/lib/formatters";
-import type { CallListItem } from "@/types/api";
+import { formatDateTime, formatDuration, formatPhone } from "@/lib/formatters";
+import type { BusinessProfile, CallListItem } from "@/types/api";
 
 export const metadata: Metadata = {
   title: "Calls",
-  description: "History of every call the RO sales agent has placed or received.",
+  description: "History of every call the AI agent has placed or received.",
 };
 
 const PAGE_SIZE = 20;
@@ -25,7 +25,23 @@ type CallsSearchParams = {
   date_from?: string;
   date_to?: string;
   customer_name?: string;
+  follow_up?: string;
+  outcome?: string;
+  channel?: string;
+  profile_id?: string;
 };
+
+const FILTER_KEYS = [
+  "status",
+  "lead_status",
+  "date_from",
+  "date_to",
+  "customer_name",
+  "follow_up",
+  "outcome",
+  "channel",
+  "profile_id",
+] as const;
 
 export default async function CallsPage({
   searchParams,
@@ -35,28 +51,26 @@ export default async function CallsPage({
   const params = await searchParams;
   const offset = Math.max(0, Number(params.offset ?? 0) || 0);
 
-  const filters: CallListFilters = {
-    limit: PAGE_SIZE,
-    offset,
-    status: params.status || undefined,
-    lead_status: params.lead_status || undefined,
-    date_from: params.date_from || undefined,
-    date_to: params.date_to || undefined,
-    customer_name: params.customer_name || undefined,
-  };
-  const filtersActive = Boolean(
-    filters.status || filters.lead_status || filters.date_from || filters.date_to || filters.customer_name,
-  );
+  const filters: CallListFilters = { limit: PAGE_SIZE, offset };
+  for (const key of FILTER_KEYS) {
+    filters[key] = params[key] || undefined;
+  }
+  const filtersActive = FILTER_KEYS.some((key) => Boolean(filters[key]));
 
   let items: CallListItem[] = [];
   let total = 0;
+  let profiles: BusinessProfile[] = [];
   let loadError: string | null = null;
 
   try {
     const apiClient = await getServerApiClient();
-    const result = await apiClient.listCalls(filters);
+    const [result, profileList] = await Promise.all([
+      apiClient.listCalls(filters),
+      apiClient.listProfiles(),
+    ]);
     items = result.items;
     total = result.total;
+    profiles = profileList;
   } catch (err) {
     redirectIfUnauthenticated(err);
     loadError = err instanceof ApiError ? err.message : "Failed to load calls.";
@@ -67,17 +81,16 @@ export default async function CallsPage({
   const pageQuery = (nextOffset: number) => {
     const usp = new URLSearchParams();
     usp.set("offset", String(nextOffset));
-    if (filters.status) usp.set("status", filters.status);
-    if (filters.lead_status) usp.set("lead_status", filters.lead_status);
-    if (filters.date_from) usp.set("date_from", filters.date_from);
-    if (filters.date_to) usp.set("date_to", filters.date_to);
-    if (filters.customer_name) usp.set("customer_name", filters.customer_name);
+    for (const key of FILTER_KEYS) {
+      const value = filters[key];
+      if (value) usp.set(key, String(value));
+    }
     return `/calls?${usp.toString()}`;
   };
 
   return (
     <PageShell title="Calls" description={`${total} call${total === 1 ? "" : "s"} on record.`}>
-      <CallsFilterBar />
+      <CallsFilterBar profiles={profiles.map((p) => ({ id: p.id, name: p.name }))} />
 
       {loadError ? (
         <ErrorState message={loadError} />
@@ -96,11 +109,14 @@ export default async function CallsPage({
             <THead>
               <TR>
                 <TH>Customer</TH>
-                <TH>Direction</TH>
-                <TH>Status</TH>
-                <TH>Lead</TH>
+                <TH>Phone</TH>
+                <TH>Date</TH>
                 <TH>Duration</TH>
-                <TH>Started</TH>
+                <TH>Status</TH>
+                <TH>Outcome</TH>
+                <TH>Lead</TH>
+                <TH>Follow-up</TH>
+                <TH>Channel</TH>
               </TR>
             </THead>
             <TBody>
@@ -113,16 +129,26 @@ export default async function CallsPage({
                     >
                       {call.customer_name}
                     </Link>
+                    {profiles.length > 1 && call.profile_name ? (
+                      <p className="text-xs text-muted-foreground">{call.profile_name}</p>
+                    ) : null}
                   </TD>
-                  <TD className="capitalize">{call.direction}</TD>
+                  <TD>{formatPhone(call.customer_phone)}</TD>
+                  <TD>{formatDateTime(call.start_time ?? call.created_at)}</TD>
+                  <TD>{formatDuration(call.duration_seconds)}</TD>
                   <TD>
                     <CallStatusBadge status={call.status} />
                   </TD>
                   <TD>
+                    <OutcomeBadge outcome={call.outcome} />
+                  </TD>
+                  <TD>
                     <LeadStatusBadge status={call.lead_status} />
                   </TD>
-                  <TD>{formatDuration(call.duration_seconds)}</TD>
-                  <TD>{formatDateTime(call.start_time ?? call.created_at)}</TD>
+                  <TD>{call.follow_up == null ? "—" : call.follow_up ? "Yes" : "No"}</TD>
+                  <TD>
+                    <ChannelBadge channel={call.channel} />
+                  </TD>
                 </TR>
               ))}
             </TBody>

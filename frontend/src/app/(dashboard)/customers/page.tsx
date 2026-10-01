@@ -9,6 +9,7 @@ import { ApiError, type makeApiClient } from "@/lib/apiClient";
 import { redirectIfUnauthenticated } from "@/lib/auth";
 import { getServerApiClient } from "@/lib/serverApiClient";
 import { formatDateTime, formatPhone } from "@/lib/formatters";
+import type { BusinessProfile } from "@/types/api";
 
 export const metadata: Metadata = {
   title: "Customers",
@@ -27,17 +28,26 @@ export default async function CustomersPage({
 
   let items: Awaited<ReturnType<ReturnType<typeof makeApiClient>["listCustomers"]>>["items"] = [];
   let total = 0;
+  let profiles: BusinessProfile[] = [];
   let loadError: string | null = null;
 
   try {
     const apiClient = await getServerApiClient();
-    const result = await apiClient.listCustomers({ limit: PAGE_SIZE, offset });
+    const [result, profileList] = await Promise.all([
+      apiClient.listCustomers({ limit: PAGE_SIZE, offset }),
+      apiClient.listProfiles(),
+    ]);
     items = result.items;
     total = result.total;
+    profiles = profileList;
   } catch (err) {
     redirectIfUnauthenticated(err);
     loadError = err instanceof ApiError ? err.message : "Failed to load customers.";
   }
+
+  const defaultProfile = profiles.find((p) => p.is_default);
+  const profileName = (id: string | null) =>
+    profiles.find((p) => p.id === id)?.name ?? defaultProfile?.name ?? "—";
 
   const hasPrev = offset > 0;
   const hasNext = offset + PAGE_SIZE < total;
@@ -46,7 +56,7 @@ export default async function CustomersPage({
     <PageShell
       title="Customers"
       description={`${total} customer${total === 1 ? "" : "s"} on file.`}
-      actions={<AddCustomerDialog />}
+      actions={<AddCustomerDialog profiles={profiles} />}
     >
       {loadError ? (
         <ErrorState message={loadError} />
@@ -63,6 +73,8 @@ export default async function CustomersPage({
                 <TH>Name</TH>
                 <TH>Phone</TH>
                 <TH>Company</TH>
+                <TH>Business</TH>
+                <TH>Purpose / product</TH>
                 <TH>Added</TH>
                 <TH>Actions</TH>
               </TR>
@@ -73,6 +85,10 @@ export default async function CustomersPage({
                   <TD className="font-medium text-foreground">{customer.name}</TD>
                   <TD>{formatPhone(customer.phone)}</TD>
                   <TD>{customer.company ?? "—"}</TD>
+                  <TD>{profileName(customer.profile_id)}</TD>
+                  <TD>
+                    {[customer.purpose, customer.product].filter(Boolean).join(" · ") || "—"}
+                  </TD>
                   <TD>{formatDateTime(customer.created_at)}</TD>
                   <TD>
                     <div className="flex flex-wrap items-center gap-3">
@@ -81,6 +97,12 @@ export default async function CustomersPage({
                         className="text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
                       >
                         Edit
+                      </Link>
+                      <Link
+                        href={`/customers/${customer.id}/call`}
+                        className="text-sm font-medium text-primary underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                      >
+                        Browser call
                       </Link>
                       <StartCallButton customerId={customer.id} />
                     </div>

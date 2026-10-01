@@ -52,6 +52,7 @@ class TwilioTransport:
         self.ws = websocket
         self.stream_sid: str | None = None
         self.twilio_call_sid: str | None = None
+        self.remote_ended = False  # Twilio stopped the stream (customer hung up)
         self._ratecv_in: tuple | None = None  # 8 kHz → 16 kHz converter state
         self._ratecv_out: tuple | None = None  # 24 kHz → 8 kHz converter state
 
@@ -105,10 +106,12 @@ class TwilioTransport:
                     logger.info("DTMF digit: %s", msg.get("dtmf", {}).get("digit", "?"))
                 elif event == "stop":
                     logger.info("Media Stream stopped by Twilio")
+                    self.remote_ended = True
                     yield Inbound("hangup")
                     return
         except WebSocketDisconnect:
             logger.info("Twilio WebSocket disconnected")
+            self.remote_ended = True
             yield Inbound("hangup")
 
     async def send_audio(self, pcm_24k: bytes) -> None:
@@ -144,7 +147,7 @@ class TwilioTransport:
         from audiocall.services import calls_service
 
         await self._close()
-        if self.twilio_call_sid:
+        if self.twilio_call_sid and not self.remote_ended:
             await calls_service.hang_up_phone_call(self.twilio_call_sid)
 
     async def abort(self, message: str = APOLOGY) -> None:

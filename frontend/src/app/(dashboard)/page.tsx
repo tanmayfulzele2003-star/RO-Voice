@@ -28,7 +28,7 @@ export default async function DashboardPage() {
   return (
     <PageShell
       title="Overview"
-      description="Snapshot of every call the RO sales agent has placed."
+      description="Snapshot of every call the AI agent has placed or received."
     >
       {loadError || !stats ? (
         <ErrorState message={loadError ?? "Failed to load dashboard stats."} />

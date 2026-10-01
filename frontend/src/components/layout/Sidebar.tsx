@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/", label: "Overview" },
   { href: "/customers", label: "Customers" },
   { href: "/calls", label: "Calls" },
+  { href: "/profiles", label: "Business profiles" },
 ];
 
 export function Sidebar() {
@@ -32,7 +33,7 @@ export function Sidebar() {
       className="flex shrink-0 flex-col gap-1 border-border p-4 md:w-56 md:border-r"
     >
       <p className="mb-3 px-2 text-sm font-semibold tracking-tight text-foreground">
-        Audiocall RO Sales
+        AI Calling Agent
       </p>
       {NAV_ITEMS.map((item) => {
         const isActive = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);

@@ -12,6 +12,43 @@ export type CallStatus =
 
 export type CallDirection = "outbound" | "inbound";
 
+export type CallChannel = "phone" | "browser";
+
+export type CallOutcome =
+  | "qualified"
+  | "not_interested"
+  | "callback"
+  | "incomplete"
+  | "no_answer"
+  | "no_conversation"
+  | "failed";
+
+export interface ProfileField {
+  key: string;
+  label: string;
+  description: string;
+  required: boolean;
+}
+
+export interface BusinessProfile {
+  id: string;
+  name: string;
+  agent_name: string;
+  industry: string | null;
+  description: string | null;
+  products: string | null;
+  call_objective: string;
+  greeting: string | null;
+  language: string | null;
+  fields: ProfileField[];
+  is_default: boolean;
+  created_at: string;
+}
+
+/** Create/update payload. A field's `key` may be left empty — the backend
+ * derives it from the label. */
+export type BusinessProfileInput = Omit<BusinessProfile, "id" | "created_at">;
+
 export type LeadStatus = "interested" | "not_interested" | "uncertain";
 
 export interface Paginated<T> {
@@ -26,6 +63,9 @@ export interface Customer {
   name: string;
   phone: string;
   company: string | null;
+  purpose: string | null;
+  product: string | null;
+  profile_id: string | null;
   created_at: string;
 }
 
@@ -33,13 +73,12 @@ export interface CustomerCreateInput {
   name: string;
   phone: string;
   company?: string | null;
+  purpose?: string | null;
+  product?: string | null;
+  profile_id?: string | null;
 }
 
-export interface CustomerUpdateInput {
-  name?: string;
-  phone?: string;
-  company?: string | null;
-}
+export type CustomerUpdateInput = Partial<CustomerCreateInput>;
 
 export interface CallStartResponse {
   call_id: string;
@@ -47,13 +86,24 @@ export interface CallStartResponse {
   status: CallStatus;
 }
 
+export interface BrowserCallStartResponse {
+  call_id: string;
+  token: string;
+  stream_url: string;
+}
+
 export interface CallListItem {
   id: string;
   customer_id: string;
   customer_name: string;
+  customer_phone: string;
+  profile_name: string | null;
   direction: CallDirection;
+  channel: CallChannel;
   status: CallStatus;
+  outcome: CallOutcome | null;
   lead_status: LeadStatus | null;
+  follow_up: boolean | null;
   start_time: string | null;
   end_time: string | null;
   duration_seconds: number | null;
@@ -76,6 +126,13 @@ export interface Requirements {
   budget: string | null;
   timeline: string | null;
   additional_requirements: string | null;
+  fields: Record<string, string> | null;
+}
+
+export interface CallEvent {
+  event_type: string;
+  detail: string | null;
+  created_at: string;
 }
 
 export interface CallSummary {
@@ -84,6 +141,8 @@ export interface CallSummary {
   key_requirements: string[] | null;
   important_points: string[] | null;
   follow_up: boolean | null;
+  follow_up_notes: string | null;
+  call_outcome: string | null;
   lead_status: LeadStatus | null;
 }
 
@@ -92,15 +151,24 @@ export interface CallDetail {
   customer_id: string;
   customer_name: string;
   customer_phone: string;
+  customer_company: string | null;
+  customer_purpose: string | null;
+  customer_product: string | null;
+  profile_id: string | null;
+  profile_name: string | null;
+  profile_fields: ProfileField[];
   twilio_call_sid: string | null;
   direction: CallDirection;
+  channel: CallChannel;
   status: CallStatus;
+  outcome: CallOutcome | null;
   start_time: string | null;
   end_time: string | null;
   duration_seconds: number | null;
   error_reason: string | null;
   created_at: string;
   messages: ConversationMessage[];
+  events: CallEvent[];
   requirements: Requirements | null;
   summary: CallSummary | null;
 }

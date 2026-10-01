@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { PageShell } from "@/components/layout/PageShell";
-import { CustomerForm } from "@/components/sections/CustomerForm";
-import { Card } from "@/components/ui/Card";
+import { BrowserCall } from "@/components/sections/BrowserCall";
 import { ErrorState } from "@/components/ui/States";
 import { ApiError } from "@/lib/apiClient";
 import { redirectIfUnauthenticated } from "@/lib/auth";
@@ -10,10 +9,11 @@ import { getServerApiClient } from "@/lib/serverApiClient";
 import type { BusinessProfile, Customer } from "@/types/api";
 
 export const metadata: Metadata = {
-  title: "Edit customer",
+  title: "Browser call",
+  description: "Two-way AI voice call through the browser microphone (WebRTC).",
 };
 
-export default async function EditCustomerPage({
+export default async function BrowserCallPage({
   params,
 }: {
   params: Promise<{ id: string }>;
@@ -35,15 +35,27 @@ export default async function EditCustomerPage({
     loadError = err instanceof ApiError ? err.message : "Failed to load customer.";
   }
 
-  return (
-    <PageShell title="Edit customer" description={customer?.name}>
-      {loadError || !customer ? (
+  if (loadError || !customer) {
+    return (
+      <PageShell title="Browser call">
         <ErrorState message={loadError ?? "Failed to load customer."} />
-      ) : (
-        <Card className="max-w-lg">
-          <CustomerForm mode="edit" customer={customer} profiles={profiles} />
-        </Card>
-      )}
+      </PageShell>
+    );
+  }
+
+  const profile =
+    profiles.find((p) => p.id === customer.profile_id) ?? profiles.find((p) => p.is_default);
+
+  return (
+    <PageShell
+      title={`Browser call · ${customer.name}`}
+      description="The same AI calling agent as a phone call, through your microphone and speakers — for demos when the calling provider's free tier can't reach a number. Use headphones for best results."
+    >
+      <BrowserCall
+        customerId={customer.id}
+        customerName={customer.name}
+        profileName={profile?.name ?? "the default profile"}
+      />
     </PageShell>
   );
 }

@@ -44,8 +44,12 @@ from audiocall.core.config import (
     SILENCE_HANGUP_SECONDS,
     SILENCE_PROMPT_SECONDS,
 )
-from audiocall.services import calls_service, events_service, transcript_service
-from audiocall.services.outcome import outcome_from_analysis
+from audiocall.services import (
+    calls_service,
+    events_service,
+    requirements_service,
+    transcript_service,
+)
 from audiocall.voice.transports import Inbound
 
 logger = logging.getLogger(__name__)
@@ -109,6 +113,13 @@ class CallBridge:
         self.last_activity = time.monotonic()
         self.silence_nudged = False
         self.agent_speaking = False
+        # Gemini generates audio faster than real time, so "the agent finished"
+        # (turn_complete) comes before the customer has finished *hearing* it.
+        # Track when queued playback actually ends, and count silence from then.
+        self.playback_until = 0.0
+        self.audio_in_turn = False
+        self.audio_before_end = False
+        self.audio_since_end = False
         self.voiced_ms_untranscribed = 0.0
         self.last_stt_nudge = 0.0
 
@@ -130,6 +141,9 @@ class CallBridge:
             return
         self.end_requested = True
         self.end_reason = reason
+        # If the agent already spoke in this turn (goodbye, then end_call), the
+        # line can close after that audio. Otherwise wait for the goodbye.
+        self.audio_before_end = self.audio_in_turn
 
         async def fallback() -> None:
             await asyncio.sleep(END_CALL_FALLBACK_SECONDS)
@@ -139,7 +153,11 @@ class CallBridge:
 
     # ── main entry ───────────────────────────────────────────────────────────
     async def run(self) -> None:
-        self.call_id = await self.t.wait_for_start()
+        try:
+            self.call_id = await self.t.wait_for_start()
+        except Exception:
+            logger.info("Stream closed before it started")
+            return
         if self.call_id is None:
             logger.warning("Stream has no call_id — transcript/status will not be persisted")
 
@@ -158,6 +176,8 @@ class CallBridge:
         if self.call_id is not None:
             self._bg(calls_service.mark_stream_started(self.call_id, datetime.now(timezone.utc)))
             self._event("stream_started", f"channel={self.t.channel}")
+            if state["collected"]:
+                self._bg(requirements_service.save_fields(self.call_id, state["collected"]))
 
         # Outbound call: the agent opens the conversation.
         self.queue.send_content(
@@ -201,7 +221,7 @@ class CallBridge:
 
     def _track_voice(self, item: Inbound) -> None:
         """Speech-recognition failure heuristic (see constants above)."""
-        if self.agent_speaking or not item.audio:
+        if self.agent_speaking or time.monotonic() < self.playback_until or not item.audio:
             return
         try:
             loud = audioop.rms(item.audio, 2) > SPEECH_RMS_THRESHOLD
@@ -301,6 +321,8 @@ class CallBridge:
         if event.interrupted:
             self.interruptions += 1
             self.agent_speaking = False
+            self.audio_in_turn = False
+            self.playback_until = time.monotonic()  # buffered audio is dropped
             if self.interruptions % 3 == 1:
                 self._event("interruption", f"customer interrupted the agent (#{self.interruptions})")
             await self.t.clear()
@@ -308,9 +330,10 @@ class CallBridge:
 
         if event.turn_complete:
             self.agent_speaking = False
-            self.last_activity = time.monotonic()  # silence clock starts after the agent finishes
-            if self.end_requested:
-                # Hang up once the far end has actually played the goodbye.
+            self.audio_in_turn = False
+            if self.end_requested and (self.audio_before_end or self.audio_since_end):
+                # Hang up once the far end has actually played the goodbye
+                # (the mark is acknowledged after all audio queued before it).
                 await self.t.send_mark(HANGUP_MARK)
             return
 
@@ -319,6 +342,12 @@ class CallBridge:
                 blob = part.inline_data
                 if blob and blob.data and (blob.mime_type or "").startswith("audio/pcm"):
                     self.agent_speaking = True
+                    self.audio_in_turn = True
+                    if self.end_requested:
+                        self.audio_since_end = True
+                    # PCM-16 mono at 24 kHz = 48 000 bytes per second of speech.
+                    now = time.monotonic()
+                    self.playback_until = max(self.playback_until, now) + len(blob.data) / 48000
                     await self.t.send_audio(blob.data)
 
     # ── silence & duration watchdog ──────────────────────────────────────────
@@ -337,9 +366,12 @@ class CallBridge:
                 )
                 self.request_end("max_duration")
                 continue
-            if self.agent_speaking:
+            now = time.monotonic()
+            if self.agent_speaking or now < self.playback_until:
                 continue
-            silent_for = time.monotonic() - self.last_activity
+            # Silence counts from whichever is later: the customer's last
+            # words, or the end of the agent's audio playback.
+            silent_for = now - max(self.last_activity, self.playback_until)
             if silent_for > SILENCE_HANGUP_SECONDS:
                 self.silence_timeout = True
                 self._event("silence_timeout", f"no response for {silent_for:.0f}s")
@@ -407,8 +439,11 @@ class CallBridge:
 
         if self.agent_assessment and self.customer_spoke:
             # The agent's own verdict, until post-call analysis refines it.
-            await calls_service.set_outcome(
-                self.call_id, outcome_from_analysis(self.agent_assessment.get("lead_status"))
+            follow_up = self.agent_assessment.get("follow_up_required")
+            await calls_service.record_agent_assessment(
+                self.call_id,
+                self.agent_assessment.get("lead_status"),
+                bool(follow_up) if follow_up is not None else None,
             )
 
         ended_by = self.end_reason or ("customer_hung_up" if self.customer_hung_up else "stream closed")

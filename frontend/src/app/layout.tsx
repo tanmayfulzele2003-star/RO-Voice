@@ -14,10 +14,10 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: {
-    template: "%s · Audiocall RO Sales",
-    default: "Audiocall RO Sales",
+    template: "%s · AI Calling Agent",
+    default: "AI Calling Agent",
   },
-  description: "Admin dashboard for the RO sales voice-agent calling platform.",
+  description: "Admin dashboard for the AI two-way calling agent platform.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

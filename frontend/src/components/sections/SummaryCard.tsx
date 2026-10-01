@@ -11,7 +11,10 @@ export function SummaryCard({ summary }: { summary: CallSummary | null }) {
       </div>
       {summary ? (
         <div className="flex flex-col gap-3 text-sm text-foreground">
-          <p>{summary.summary ?? "No summary text available."}</p>
+          <p className={summary.summary ? "" : "text-muted-foreground"}>
+            {summary.summary ??
+              "The AI summary is being generated. Lead status and follow-up below are the agent's own end-of-call assessment."}
+          </p>
           {summary.customer_intent ? (
             <p>
               <span className="font-medium">Intent: </span>
@@ -38,6 +41,12 @@ export function SummaryCard({ summary }: { summary: CallSummary | null }) {
               </ul>
             </div>
           ) : null}
+          {summary.call_outcome ? (
+            <p>
+              <span className="font-medium">Call outcome: </span>
+              {summary.call_outcome}
+            </p>
+          ) : null}
           <p>
             <span className="font-medium">Follow-up required: </span>
             {summary.follow_up === null || summary.follow_up === undefined
@@ -45,6 +54,7 @@ export function SummaryCard({ summary }: { summary: CallSummary | null }) {
               : summary.follow_up
                 ? "Yes"
                 : "No"}
+            {summary.follow_up && summary.follow_up_notes ? ` — ${summary.follow_up_notes}` : ""}
           </p>
         </div>
       ) : (

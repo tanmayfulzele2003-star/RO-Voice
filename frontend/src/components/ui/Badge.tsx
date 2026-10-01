@@ -56,3 +56,32 @@ export function LeadStatusBadge({ status }: { status: string | null }) {
   if (!status) return <Badge tone="neutral">Unknown</Badge>;
   return <Badge tone={LEAD_STATUS_TONE[status] ?? "neutral"}>{LEAD_STATUS_LABEL[status] ?? status}</Badge>;
 }
+
+const OUTCOME_TONE: Record<string, Tone> = {
+  qualified: "success",
+  not_interested: "danger",
+  callback: "warning",
+  incomplete: "neutral",
+  no_answer: "warning",
+  no_conversation: "neutral",
+  failed: "danger",
+};
+
+export const OUTCOME_LABEL: Record<string, string> = {
+  qualified: "Qualified lead",
+  not_interested: "Not interested",
+  callback: "Call back",
+  incomplete: "Incomplete",
+  no_answer: "No answer",
+  no_conversation: "No conversation",
+  failed: "Failed",
+};
+
+export function OutcomeBadge({ outcome }: { outcome: string | null }) {
+  if (!outcome) return <Badge tone="neutral">Pending</Badge>;
+  return <Badge tone={OUTCOME_TONE[outcome] ?? "neutral"}>{OUTCOME_LABEL[outcome] ?? outcome}</Badge>;
+}
+
+export function ChannelBadge({ channel }: { channel: string }) {
+  return <Badge tone="info">{channel === "browser" ? "Browser" : "Phone"}</Badge>;
+}

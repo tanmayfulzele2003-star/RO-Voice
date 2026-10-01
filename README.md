@@ -1,262 +1,420 @@
-# RO Sales Voice-Agent Platform
+# AI-Powered Two-Way Calling Agent
 
-An AI outbound-calling platform for RO (reverse-osmosis water system) sales qualification: it
-places real phone calls via Twilio, has a live conversation through Google ADK + Gemini Live,
-persists every call to Postgres, extracts structured requirements from the transcript after the
-call ends, and exposes it all through a Next.js admin dashboard with authentication.
+An AI calling agent that **places an outbound call itself, holds a natural two-way voice
+conversation, keeps context, collects the information it needs, decides when the call is done, and
+hands everything to an admin dashboard**. No human operator is involved at any point.
 
-Built on top of the open-source [`Iamsdt/audiocall`](https://github.com/Iamsdt/audiocall)
-Twilio ↔ FastAPI ↔ Google ADK audio bridge, which is kept as-is. Everything else — persistence,
-transcript capture, AI extraction, the dashboard, auth, and hardening — is new. See
+* **Calling:** a real phone call through Twilio, or a **browser (WebRTC) call** from the dashboard
+  when a free or trial telephony plan can't reach the number. Both channels share the same agent.
+* **Agentic AI:** a Google ADK agent on Gemini Live with tools (`save_customer_info`,
+  `get_call_progress`, `end_call`). It tracks a checklist, asks only for what's missing, and makes its
+  own lead assessment.
+* **Any business:** the agent is configured by **business profiles** (persona, products, call
+  objective, fields to collect), which you edit in the dashboard. RO water systems is the seeded
+  default; add a hotel, solar, insurance or clinic profile without touching code.
+* **Persistence:** PostgreSQL stores every call, each conversation turn, the requirements collected
+  live, an event log (errors, silences, interruptions), an AI summary and the call outcome.
+* **Dashboard:** Next.js. Customers, one-click calling, live browser calls, call history with
+  filters, transcript, AI summary and statistics.
+
+Built on the open-source [`Iamsdt/audiocall`](https://github.com/Iamsdt/audiocall) Twilio ↔ FastAPI
+↔ Google ADK audio bridge. The μ-law/PCM conversion comes from there; everything else is new. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the full system design.
 
-[![Python](https://img.shields.io/badge/Python-3.13%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-realtime-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js&logoColor=white)](https://nextjs.org/)
-[![Twilio](https://img.shields.io/badge/Twilio-Voice%20API-F22F46?logo=twilio&logoColor=white)](https://www.twilio.com/voice)
-[![Google ADK](https://img.shields.io/badge/Google-ADK-4285F4?logo=google&logoColor=white)](https://google.github.io/adk-docs/)
-[![Gemini Live](https://img.shields.io/badge/Gemini-Live%20API-1A73E8?logo=googlebard&logoColor=white)](https://ai.google.dev/)
+---
 
-## What it does
+## Technology used (and what's free)
 
-1. An admin creates a customer in the dashboard (name, phone, company).
-2. The admin clicks **Start Call**; the backend dials the customer through Twilio and bridges the
-   call to a Gemini Live voice agent running an RO sales-qualification script.
-3. The agent collects structured requirements conversationally: capacity needed, location,
-   budget, timeline, and any extra notes — while the raw transcript is persisted turn-by-turn.
-4. When the call ends, a second (non-live) text model reads the saved transcript and extracts a
-   structured summary, lead status (`interested` / `not_interested` / `uncertain`), and a
-   follow-up flag.
-5. The admin reviews all of this — transcript, requirements, summary, call outcome — in the
-   dashboard, and can filter call history by status, lead status, date range, or customer name.
+| Concern | Used | Free / trial tier |
+|---|---|---|
+| Backend | Python 3.13, FastAPI, SQLAlchemy 2 (async), Alembic | Open source |
+| Frontend | Next.js 16 (App Router, TypeScript), Tailwind CSS v4 | Open source |
+| Database | PostgreSQL 14+ | Open source; Neon / Render free tiers |
+| **AI model (conversation)** | **Gemini Live API**, `gemini-2.5-flash-native-audio-preview-12-2025`, via **Google ADK** (agent framework) | Google AI Studio free tier |
+| **Speech-to-text** | Gemini Live **input audio transcription** (built into the Live session) | Same free tier |
+| **Text-to-speech** | Gemini Live **native audio output**, prebuilt voice `Puck` (configurable) | Same free tier |
+| AI model (post-call summary) | `gemini-2.5-flash` with structured JSON output, or NVIDIA NIM (`SUMMARY_PROVIDER=nvidia`) | Free tiers |
+| **Calling provider** | **Twilio Programmable Voice + Media Streams** | Twilio trial account |
+| Fallback calling mode | Browser microphone over WebSocket (WebRTC `getUserMedia` + AudioWorklet) | Free, no provider |
 
-## Architecture at a glance
+Gemini native audio is a speech-to-speech model. The six steps in the brief (capture speech, STT,
+send to the agent, generate a response, TTS, play back) all happen inside one low-latency Live
+session instead of three separate services. That's what keeps turn latency around 0.5 s. Both
+sides of the conversation are still transcribed as text, saved turn by turn, and analysed after the
+call.
 
-```mermaid
-flowchart LR
-    A[Caller/Callee] <--> B[Twilio Voice]
-    B <--> C[FastAPI backend\naudio bridge]
-    C <--> D[Google ADK + Gemini Live]
-    C --> E[(PostgreSQL)]
-    C -. post-call .-> F[Text model\nextraction + summary]
-    F --> E
-    G[Next.js dashboard] <--> C
+---
+
+## Setup instructions
+
+### 1. Clone the project
+
+```bash
+git clone https://github.com/tanmayfulzele2003-star/RO-Voice.git
+cd RO-Voice
 ```
 
-Full diagram, request-path security table, and the ER diagram are in
-[ARCHITECTURE.md](ARCHITECTURE.md).
+Prerequisites: Python 3.13+, Node.js 20+, PostgreSQL 14+, a
+[Google AI Studio API key](https://aistudio.google.com/apikey). A Twilio account is optional and
+only needed for real phone calls.
 
-## Repository layout
-
-```text
-backend/    FastAPI app: Twilio↔ADK bridge, REST API, Postgres models, Alembic migrations
-frontend/   Next.js 16 admin dashboard (App Router, TypeScript strict, Tailwind v4)
-database/   Schema snapshot (schema.sql) — Alembic in backend/alembic is the source of truth
-```
-
-## Prerequisites
-
-- Python 3.13+
-- Node.js 20+
-- A PostgreSQL 14+ database (managed — e.g. [Neon](https://neon.tech) or
-  [Render Postgres](https://render.com/docs/databases) — or any local instance for development;
-  there's no bundled Docker Compose Postgres)
-- A Twilio account with a phone number (only required to place a **real** call — everything else
-  runs without one)
-- A Google AI Studio API key for Gemini Live (the live call always needs this — no substitute)
-- Optionally, an NVIDIA NIM API key if you want the post-call summary/extraction step to run
-  against NVIDIA instead of Gemini (see [Customizing the agent](#customizing-the-agent))
-
-## Setup — zero to a placed test call
-
-### 1. Database
+### 2. Install dependencies
 
 ```bash
 cd backend
-cp .env.example .env
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e .                                     # or: uv sync
+cd ../frontend
+npm install
 ```
 
-Fill in `.env`:
-- `DATABASE_URL` — your Postgres connection string (`postgresql+asyncpg://user:pass@host:5432/db`)
-- `SESSION_SECRET` — generate with `python -c "import secrets; print(secrets.token_hex(32))"`
-- Leave `TWILIO_*` and `GOOGLE_API_KEY` for step 4 if you don't have real credentials yet — the
-  dashboard, database, and auth all work without them; only placing a real call needs them.
+### 3. Configure environment variables
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e .
-python -m alembic upgrade head
-python scripts/create_admin.py <username> <password>
+cp backend/.env.example backend/.env
+cp frontend/.env.example frontend/.env.local
 ```
 
-### 2. Backend
+[`.env.example`](.env.example) at the repo root lists every variable in one place. The minimum to
+run the dashboard and browser calls:
+
+| Variable | Where | Value |
+|---|---|---|
+| `DATABASE_URL` | backend | `postgresql+asyncpg://user:pass@localhost:5432/calling_agent` |
+| `SESSION_SECRET` | backend | `python -c "import secrets; print(secrets.token_hex(32))"` |
+| `GOOGLE_API_KEY` | backend | your AI Studio key |
+| `SERVER_HOST` | backend | `localhost:8000` for local browser calls (a public host for Twilio, see step 7) |
+| `USE_TLS` | backend | `false` locally, `true` behind ngrok/production |
+| `NEXT_PUBLIC_API_URL` | frontend | `http://localhost:8000` |
+
+No secrets are committed. `.env` files are git-ignored.
+
+### 4. Set up PostgreSQL
 
 ```bash
-python -m audiocall.main
-# or: uvicorn audiocall.main:app --host 0.0.0.0 --port 8000 --reload
+createdb calling_agent                 # or create one on Neon / Render
+cd backend
+python -m alembic upgrade head         # creates tables + seeds the default RO business profile
+python scripts/create_admin.py admin <password>
 ```
 
-Visit `http://localhost:8000/health` — should return `{"status": "ok"}`.
+### 5. Run FastAPI
 
-> `--reload` occasionally serves stale code after a file save without actually restarting the
-> worker process. If a change doesn't seem to take effect, kill and restart the process manually
-> rather than trusting the auto-reload.
+```bash
+cd backend
+python -m audiocall.main               # or: uvicorn audiocall.main:app --port 8000
+```
 
-### 3. Frontend
+`http://localhost:8000/health` returns `{"status":"ok"}`. Interactive API docs are at
+`http://localhost:8000/docs`.
+
+### 6. Run Next.js
 
 ```bash
 cd frontend
-cp .env.example .env.local   # NEXT_PUBLIC_API_URL should point at your backend
-npm install
 npm run dev
 ```
 
-Visit `http://localhost:3000` (falls back to `3001` if `3000` is taken), sign in with the admin
-user you created, and add a customer.
+Open `http://localhost:3000` and sign in with the admin you created.
 
-### 4. Place a real call (needs Twilio + Gemini credentials)
+### 7. Configure the calling provider (Twilio, for real phone calls)
 
-Twilio needs a public URL to reach your backend. For local development, use ngrok (or
-`npx localtunnel --port 8000` if you don't want to sign up for anything):
+1. Create a free [Twilio trial account](https://www.twilio.com/try-twilio) and get a phone number
+   with Voice capability.
+2. **Verify the number you'll call:** Console → Phone Numbers → Manage → **Verified Caller IDs**.
+   Trial accounts can only call verified numbers.
+3. **Enable the destination country:** Console → Voice → Settings → **Geo permissions**. For
+   example, tick India to call `+91` numbers. Most countries are off by default.
+4. Expose the backend publicly so Twilio can reach it: `ngrok http 8000`.
+5. In `backend/.env` set:
+   ```bash
+   SERVER_HOST=abc123.ngrok-free.app   # no https://, no trailing slash
+   USE_TLS=true
+   TWILIO_ACCOUNT_SID=AC...
+   TWILIO_AUTH_TOKEN=...
+   TWILIO_PHONE_NUMBER=+1...           # your Twilio number, E.164
+   ```
+6. Restart the backend. You don't need to set a webhook on the Twilio number for outbound calls,
+   because the backend passes the `/voice` and `/call-status` URLs to Twilio with each call. For
+   inbound calls, set the number's "A call comes in" webhook to `https://<host>/voice` (POST).
+
+### 8. Start a test call
+
+1. **Business profiles:** use the default *AquaPure RO Systems*, or click **New profile** to set up
+   another business.
+2. **Customers → Add customer:** name, phone in international format (`+919876543210`), purpose,
+   product and business profile.
+3. Start the call:
+   * **Phone call:** the backend dials through Twilio. Answer, and on a trial account **press any key
+     after the trial message**. The agent then greets you by name and starts qualifying.
+   * **Browser call:** opens a page where you play the customer through your microphone. This works
+     with no Twilio account at all. Use headphones.
+4. Talk naturally: *"I need a commercial RO system for my hotel, around 500 LPH."* The agent saves
+   each detail as you give it (shown live in browser calls), asks only for what's missing, reads
+   back a summary, says goodbye and hangs up.
+5. **Calls** shows the call with status, outcome, transcript, collected requirements, the AI
+   summary and an event timeline.
+
+### Tests
 
 ```bash
-ngrok http 8000
+cd backend && pytest       # 32 tests: conversation logic, validation, transports, simulated calls
+cd frontend && npm run lint && npm run build
 ```
 
-Set in `backend/.env`:
+The backend tests need no database or API keys. Gemini, Twilio and Postgres are faked, and full
+calls (greeting → collection → barge-in → `end_call` → hang-up after playback, AI failure,
+silence, customer hang-up) run through the real conversation engine.
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Customer
+        Phone((Phone))
+        Browser((Browser mic))
+    end
+    Twilio[Twilio Voice<br/>Media Streams]
+    subgraph Backend["FastAPI backend"]
+        TT[TwilioTransport<br/>μ-law 8k ⇄ PCM]
+        BT[BrowserTransport<br/>PCM 16k/24k]
+        Bridge[CallBridge<br/>conversation engine:<br/>silence · barge-in ·<br/>errors · hang-up]
+        Agent[ADK agent<br/>+ tools]
+        API[REST /api/*]
+        Post[Post-call analysis]
+    end
+    Gemini[Gemini Live<br/>STT + LLM + TTS]
+    Text[Gemini text model]
+    DB[(PostgreSQL)]
+    Dash[Next.js dashboard]
+
+    Phone <--> Twilio <-->|WS /stream| TT --> Bridge
+    Browser <-->|WS /browser-stream| BT --> Bridge
+    Bridge <--> Agent <--> Gemini
+    Agent -->|fields collected live| DB
+    Bridge -->|turns · events · status| DB
+    Bridge -->|call ended| Post --> Text
+    Post -->|summary · requirements · outcome| DB
+    Dash <--> API <--> DB
+    API -->|start call| Twilio
+```
+
+[ARCHITECTURE.md](ARCHITECTURE.md) has the detailed component diagram, the security model and
+design decisions.
+
+---
+
+## AI workflow (agentic)
+
+The agent isn't a "send every sentence to an LLM" loop. Each call runs one Gemini Live agent session
+whose **state** carries the call's business profile, the customer record and what has been
+collected so far. The agent acts through tools:
+
+| Tool | When the agent calls it | What it does |
+|---|---|---|
+| `save_customer_info(field, value)` | Every time the customer gives a checklist item, even unprompted or several at once | Saves the value to Postgres immediately and returns `collected`, `still_missing`, `next_field_to_ask` and `all_required_collected` |
+| `get_call_progress()` | After a digression, when unsure what's left | Returns the same progress snapshot |
+| `end_call(lead_status, follow_up_required, reason)` | After its goodbye, or when the customer isn't interested or wants to stop | Records its own lead verdict. The bridge hangs up **after the goodbye has finished playing** |
+
+How the agent keeps context and avoids repeating questions:
+
+1. **The checklist decides, not the model's memory.** `conversation.py` computes the next missing
+   field (required ones first, in profile order) and returns it with every tool call. The agent is
+   told never to ask about anything in `collected`.
+2. **Known facts are pre-filled.** The name and company already stored on the customer count as
+   collected from the start, so the agent confirms them instead of asking again.
+3. **The prompt is built per call** from the profile: persona, business description, products,
+   call objective, language policy, the customer's purpose and product, and the checklist. The
+   prompt also tells the agent to use context ("You mentioned this is for a hotel…").
+4. **The agent speaks first.** On connect, the bridge tells the agent to greet the customer by name,
+   so nobody has to say "hello" first.
+5. **Post-call analysis.** When the stream ends, a separate text model reads the full transcript
+   and returns structured JSON:
+   * the profile's fields
+   * a summary
+   * customer intent
+   * key requirements
+   * important points
+   * lead status
+   * follow-up needed, with notes
+   * a one-line call outcome
+
+   This fills any gaps left by the live collection, and sets the call's **outcome**. If analysis
+   fails, the agent's own `end_call` verdict is kept.
+
+**Outcome** values: `qualified`, `not_interested`, `callback`, `incomplete`, `no_answer`,
+`no_conversation`, `failed`. They come from the call status plus the AI assessment
+(`services/outcome.py`).
+
+## Calling workflow
+
+```mermaid
+sequenceDiagram
+    participant A as Admin (dashboard)
+    participant B as FastAPI
+    participant T as Twilio
+    participant C as Customer phone
+    participant G as Gemini Live agent
+    A->>B: POST /api/calls {customer_id}
+    B->>B: validate E.164, config; create calls row (queued)
+    B->>T: calls.create(to, url=/voice?call_id, statusCallback)
+    T-->>B: POST /call-status (initiated → ringing)
+    T->>C: rings
+    C-->>T: answers
+    T->>B: POST /voice (signed)
+    B-->>T: TwiML <Connect><Stream url=wss://…/stream>
+    T->>B: WS /stream (start event, call_id)
+    B->>G: open Live session (profile + customer in state), "greet now"
+    loop conversation
+        G-->>B: speech audio + transcript
+        B-->>T: μ-law audio → customer hears agent
+        C->>T: customer speaks
+        T->>B: μ-law audio
+        B->>G: PCM 16 kHz
+        G->>B: tool call save_customer_info → saved to DB
+    end
+    G->>B: end_call(lead_status, follow_up)
+    B-->>T: mark after the goodbye audio
+    T->>B: mark played
+    B->>B: save status/duration/outcome, then close stream (call ends)
+    T-->>B: POST /call-status (completed)
+    B->>B: post-call AI analysis → summary, requirements, outcome
+```
+
+The **browser call** is identical except the dashboard plays Twilio's role.
+`POST /api/calls/browser` returns a short-lived signed token, and the page streams 16 kHz PCM from
+the microphone over `WS /browser-stream` and plays the agent's 24 kHz PCM back.
+
+## Error handling
+
+Every case below is handled **and recorded** in the `call_events` table, shown on the call's
+detail page as a timeline.
+
+| Situation | What happens |
+|---|---|
+| Invalid phone number | Rejected when the customer is saved (E.164 check in the dashboard and API). Twilio's invalid-number errors (21211/21214/21217) become `invalid_number` events |
+| Calling provider failure | Twilio REST errors are translated into a clear message (unverified trial number, geo permission off, bad credentials) and shown in the dashboard. The call is marked `failed` |
+| Twilio not configured / unreachable host | Refused up front with a clear message pointing to browser-call mode |
+| Customer doesn't answer / busy | Twilio status callback → `no_answer` status and outcome (30 s ring timeout) |
+| Answered but audio never connected | Detected (`answered_but_stream_never_connected`). Usually the trial "press any key" prompt wasn't answered, or `/voice` couldn't be reached |
+| Call gets disconnected / customer hangs up | Stream `stop` → `customer_hung_up` event. Transcript and duration saved, analysis still runs |
+| Customer stays silent | After 10 s the agent checks "are you still there?". After 30 s it says a polite goodbye and the call ends as `customer_silent` / `no_conversation` |
+| Customer interrupts the AI | Barge-in: the agent's buffered audio is cleared at once and it answers what the customer said. Interruptions are counted and logged |
+| Speech-recognition failure | Sustained speech energy with no transcription → `speech_not_recognized` event, and the agent asks the customer to repeat |
+| AI / API failure | The customer hears an apology ("we'll call you back") instead of dead air, then the call ends. Status `failed`, reason `ai_error`. Post-call analysis is retried once, and its failure is logged without losing the agent's verdict |
+| Call runs too long | The agent wraps up at `MAX_CALL_SECONDS` (default 600 s) |
+
+## API documentation
+
+Interactive OpenAPI docs: **`/docs`** (Swagger) and `/redoc`. All `/api/*` routes except login
+need the admin session cookie.
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/api/auth/login` · `/api/auth/logout` · `GET /api/auth/me` | Admin session (httpOnly signed cookie) |
+| `GET` / `POST` | `/api/profiles` | List / create business profiles |
+| `GET` / `PATCH` / `DELETE` | `/api/profiles/{id}` | Read / edit / delete a profile (the default or an in-use profile can't be deleted) |
+| `GET` / `POST` | `/api/customers` | List (paginated) / create customers (`name, phone, company, purpose, product, profile_id`) |
+| `GET` / `PATCH` | `/api/customers/{id}` | Read / edit a customer |
+| `POST` | `/api/calls` | **Start a phone call** via Twilio (rate-limited 5/min) |
+| `POST` | `/api/calls/browser` | **Start a browser call**. Returns `call_id`, `token`, `stream_url` |
+| `GET` | `/api/calls` | Call list. Filters: `status, lead_status, outcome, follow_up, channel, profile_id, customer_name, date_from, date_to`, plus `limit/offset` |
+| `GET` | `/api/calls/{id}` | Call detail: info, transcript, events, requirements (labelled by profile), AI summary |
+| `GET` | `/api/stats/overview` | Total / completed / failed calls, interested leads, follow-ups, average duration |
+| `POST` | `/voice` · `/call-status` | Twilio webhooks (signature-validated) |
+| `WS` | `/stream` | Twilio Media Stream ↔ agent |
+| `WS` | `/browser-stream?call_id&token` | Browser microphone ↔ agent |
+| `POST` | `/call` | Legacy manual-test endpoint (unauthenticated; don't expose publicly) |
+| `GET` | `/health` | Health check |
+
+Example:
+
 ```bash
-SERVER_HOST=abc123.ngrok-free.app   # no https:// prefix
-USE_TLS=true
-TWILIO_ACCOUNT_SID=...
-TWILIO_AUTH_TOKEN=...
-TWILIO_PHONE_NUMBER=+1...
-GOOGLE_API_KEY=...
+curl -c jar -X POST localhost:8000/api/auth/login -H 'content-type: application/json' \
+     -d '{"username":"admin","password":"..."}'
+curl -b jar -X POST localhost:8000/api/customers -H 'content-type: application/json' \
+     -d '{"name":"Rahul Kumar","phone":"+919876543210","purpose":"Product enquiry","product":"Commercial RO System"}'
+curl -b jar -X POST localhost:8000/api/calls -H 'content-type: application/json' -d '{"customer_id":"<id>"}'
+curl -b jar 'localhost:8000/api/calls?outcome=qualified&follow_up=true'
 ```
 
-Restart the backend, then click **Start Call** on a customer in the dashboard (or
-`POST /api/calls` with `{"customer_id": "..."}` while logged in). The callee's phone rings, and
-once answered, is bridged to the live AI agent. After the call ends, refresh the call's detail
-page — the transcript, requirements, and AI summary appear once post-call analysis finishes
-(usually a few seconds).
+## Database schema
 
-> **Twilio trial accounts** can only call phone numbers you've manually verified in the Console
-> (Phone Numbers → Verified Caller IDs), and every call plays a "press any key to accept this
-> call" disclaimer before your TwiML runs — press any key to let the call continue.
+Alembic migrations in `backend/alembic/versions/` are the source of truth.
+[database/schema.sql](database/schema.sql) is a `pg_dump` snapshot for reading.
 
-## API reference
+| Table | Holds |
+|---|---|
+| `business_profiles` | Agent configuration per business: name, persona, products, objective, greeting, language, `fields` (JSONB checklist), `is_default` |
+| `customers` | name, phone (E.164), company, purpose, product, `profile_id` |
+| `calls` | customer, profile, Twilio SID, direction, **channel** (phone/browser), status, start/end time, duration, error reason, **outcome** |
+| `conversation_messages` | One row per turn: speaker (`customer`/`ai`), message, timestamp |
+| `call_events` | Event log: provider errors, silences, interruptions, fields collected, AI errors, … |
+| `requirements` | Collected fields (`fields` JSONB keyed by the profile's field keys, plus fixed RO columns) |
+| `call_summaries` | summary, intent, key requirements, important points, lead status, follow-up (+ notes), call outcome text |
+| `admin_users` | Dashboard login (bcrypt) |
 
-| Method | Endpoint | Auth | Purpose |
-|---|---|---|---|
-| `GET` | `/health` | none | Health check |
-| `POST` | `/call` | none (see note below) | Legacy manual-test endpoint: start a call for `{"customer_id": ...}` |
-| `POST` | `/voice` | Twilio signature | Twilio webhook; returns TwiML |
-| `POST` | `/call-status` | Twilio signature | Twilio `statusCallback` webhook |
-| `WS` | `/stream` | — | Bidirectional Twilio↔ADK audio bridge |
-| `POST` | `/api/auth/login` | — | Admin login; sets httpOnly session cookie |
-| `POST` | `/api/auth/logout` | session | Clears the session cookie |
-| `GET` | `/api/auth/me` | session | "Am I logged in" check |
-| `GET/POST` | `/api/customers` | session | List (paginated) / create customers |
-| `GET/PATCH` | `/api/customers/{id}` | session | Fetch / edit a customer |
-| `GET/POST` | `/api/calls` | session | List (filterable: `status`, `lead_status`, `date_from`, `date_to`, `customer_name`) / start a call (rate-limited) |
-| `GET` | `/api/calls/{id}` | session | Call detail: metadata + transcript + requirements + summary |
-| `GET` | `/api/stats/overview` | session | Dashboard totals |
+The ER diagram is in [ARCHITECTURE.md](ARCHITECTURE.md#database).
 
-`session` = a valid `audiocall_session` cookie, checked server-side on every request by the
-`require_admin` FastAPI dependency — not just hidden in the frontend.
+## Free-tier limitations
 
-**`POST /call` is intentionally unauthenticated**, kept from the upstream project for manual curl
-testing. Don't expose it publicly in a real deployment; the dashboard only ever calls the guarded
-`/api/calls`.
+| Service | Limitation | Impact / workaround |
+|---|---|---|
+| **Twilio trial** | Can only call **Verified Caller IDs**. Every call starts with a trial message and the callee must **press a key**. Calls to other countries need **Geo permissions** enabled. Limited trial credit | Verify the test number; press a key after the message; enable the country. Or use **browser-call mode** |
+| Twilio → Indian numbers | Calls from a US trial number are international. Some carriers or DND settings may block or flag them | Try another number, or use browser-call mode for the demo |
+| **Gemini API free tier** | Rate limits on Live sessions and requests; the native-audio model is a *preview*; free-tier prompts may be used by Google to improve its products | Fine for demos. Use a paid key or Vertex AI (`GOOGLE_GENAI_USE_VERTEXAI=TRUE`) for production |
+| **ngrok free** | New random hostname on every restart | Update `SERVER_HOST` and restart the backend each time |
+| **Render free** web service | Sleeps when idle; the first request takes a while to wake it | Twilio's `/voice` request may time out on a cold backend ("application error"). Open `/health` before calling |
+| Browser calls | Microphone needs `https://` or `http://localhost` | Use localhost or a TLS deployment |
+
+## Troubleshooting: "the outbound call isn't received"
+
+The outbound flow was checked end to end and its logic is correct. When a call doesn't go through,
+it's almost always one of the trial or configuration limits above. The dashboard now tells you
+which one:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Error right after clicking **Phone call** | Twilio rejected the request. The message names the reason: unverified number (21219), country disabled (21215/13227), bad number format (21211), wrong credentials (20003) | Do what the message says. Twilio Console → Monitor → Logs → Calls shows the details |
+| Phone never rings, call ends `failed` / `no_answer` | Carrier or DND blocking of international calls, phone off, ring timeout | Try a different verified number; check the Twilio call log |
+| You answer, hear the trial message, then the line drops | No key was pressed during the trial disclaimer | Press any key. The call now shows `answered_but_stream_never_connected` |
+| "An application error has occurred" | Twilio couldn't fetch `/voice`: wrong `SERVER_HOST`, tunnel down, backend asleep, or `SERVER_HOST`/`USE_TLS` not matching the public URL (signature check fails; the backend logs a warning) | Fix `SERVER_HOST`, keep ngrok running, open `/health` first |
+| Connected but nobody speaks | *(Fixed)* The agent used to wait for the callee to talk first. It now greets immediately. If it's still silent, check `GOOGLE_API_KEY` and quota: an AI failure is now announced and logged as `ai_error` | Check the call's event timeline |
+| Audio can't connect through localtunnel | localtunnel's WebSocket support is unreliable | Use ngrok |
+
+## Future improvements
+
+* Retry and reconnect for the Gemini Live session (session resumption) instead of ending the call
+* Scheduled campaigns: call lists, calling windows, automatic retries for `no_answer` / `callback`
+* Twilio answering-machine detection to leave a voicemail instead of talking to one
+* Per-profile voice selection, and a knowledge base (RAG) for product and pricing questions
+* Call recording storage with playback in the dashboard
+* Multi-user admin with roles, session revocation, and a shared (Redis) rate limiter
+* A WebSocket push channel for live call monitoring of phone calls (browser calls already stream
+  live)
+* CRM export / webhooks for qualified leads
 
 ## Security
 
-- Every `/api/*` route except `/api/auth/login` requires a signed session cookie, verified
-  server-side (`require_admin`)
-- `/voice` and `/call-status` validate Twilio's `X-Twilio-Signature` header — a forged webhook
-  without a valid signature gets `403` (`TWILIO_VALIDATE_SIGNATURE=true` by default; only disable
-  for local dev without a real Twilio account)
-- `POST /api/calls` is rate-limited per admin session (5 calls / 60s) since outbound calling is
-  billable
-- Passwords are bcrypt-hashed (`admin_users` table); there's no plaintext credential anywhere
-- Security headers (CSP, `X-Frame-Options`, `X-Content-Type-Options`, HSTS-when-HTTPS) are set on
-  both the backend (FastAPI middleware) and frontend (`next.config.ts`)
-- Secrets (`SESSION_SECRET`, `TWILIO_AUTH_TOKEN`, `GOOGLE_API_KEY`) live only in backend
-  environment variables — never sent to the client
-- See [ARCHITECTURE.md § Known limitations](ARCHITECTURE.md#known-limitations) for what this
-  does *not* cover (session revocation, multi-tenant roles, distributed rate limiting)
-
-## Audio pipeline
-
-Twilio and Gemini use different wire formats, so the backend converts live, in both directions,
-using `audioop-lts` (a maintained replacement for the stdlib `audioop` removed in Python 3.13):
-
-| Direction | In | Conversion | Out |
-|---|---|---|---|
-| Twilio → ADK | μ-law 8 kHz | `ulaw2lin` + `ratecv` 8k→16k | PCM-16 16 kHz |
-| ADK → Twilio | PCM-16 24 kHz | `ratecv` 24k→8k + `lin2ulaw` | μ-law 8 kHz |
-
-This part of the codebase is unchanged from upstream `Iamsdt/audiocall` — see
-[ARCHITECTURE.md](ARCHITECTURE.md) for why it wasn't touched.
-
-One correctness note if you're modifying `/voice`/`/stream`: Twilio's Media Stream client does not
-reliably preserve query-string parameters on the WSS URL it actually connects to. Don't rely on
-`?call_id=...` alone — pass it as a `<Parameter>` inside `<Stream>` too, and read it back from the
-`start` event's `customParameters` on the WebSocket side as a fallback. `main.py` already does
-both.
-
-## Customizing the agent
-
-Edit `backend/audiocall/agent.py` to change the persona, the fields it collects, or its
-conversational style. Change the live model with `AGENT_MODEL` and the voice with `AGENT_VOICE`
-(e.g. `Puck`, `Kore`, `Aoede`) — these always run against Gemini Live, since that's the only
-real-time audio API Google ADK integrates with.
-
-The post-call summary/extraction step is a separate, non-live text call and is pluggable via
-`SUMMARY_PROVIDER` in `.env`:
-
-- `SUMMARY_PROVIDER=gemini` (default) — uses `SUMMARY_MODEL` (e.g. `gemini-2.5-flash`) against the
-  same Google API key.
-- `SUMMARY_PROVIDER=nvidia` — uses `NVIDIA_API_KEY` / `NVIDIA_BASE_URL` / `NVIDIA_SUMMARY_MODEL`
-  against an NVIDIA NIM endpoint (OpenAI-compatible chat completions, JSON-object mode). Useful if
-  you'd rather not spend Gemini quota on the summary step. See `backend/audiocall/services/summary_service.py`.
+* All `/api/*` routes (except login) need a signed, httpOnly session cookie, checked server-side.
+  Passwords are bcrypt-hashed.
+* Twilio webhooks are signature-validated. The browser stream needs a 2-minute token bound to a
+  single queued call, so it can't be reused or replayed.
+* Call starts are rate-limited. Inputs are validated by Pydantic: E.164 phones, profile field
+  keys, and length limits.
+* Security headers (CSP incl. `connect-src` for the API's WebSocket, frame denial,
+  `Permissions-Policy` limiting the microphone to the dashboard's own origin) are set on both apps.
+  Secrets live only in backend env vars.
 
 ## Deployment
 
-Established pattern for this project: **Render** (backend + managed Postgres) + **Vercel**
-(frontend).
+**Render** (backend + Postgres) and **Vercel** (frontend):
 
-**Render (backend):**
-1. New Web Service, root directory `backend/`, build command `pip install -e .`, start command
-   `python -m audiocall.main` (reads `$PORT` automatically).
-2. Add a Render Postgres instance; copy its connection string into `DATABASE_URL` (as
-   `postgresql+asyncpg://...` — note the `+asyncpg`, Render gives you the plain `postgresql://`
-   form by default).
-3. Set every variable from `backend/.env.example` in the service's environment, with real values:
-   `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`, `GOOGLE_API_KEY`,
-   `AGENT_MODEL`, `SUMMARY_MODEL`, `SESSION_SECRET` (freshly generated), `SERVER_HOST` (the
-   Render-assigned `*.onrender.com` hostname, no scheme), `USE_TLS=true`,
-   `FRONTEND_ORIGIN` (your Vercel URL), `TWILIO_VALIDATE_SIGNATURE=true`.
-4. Run `python -m alembic upgrade head` once (Render's shell, or a one-off deploy hook) and
-   `python scripts/create_admin.py <user> <pass>` to create the admin login.
-5. In the Twilio Console, set the phone number's voice webhook to
-   `https://<your-render-host>/voice` (`HTTP POST`) and, if you want call-status tracking, add
-   `https://<your-render-host>/call-status` as the status callback.
-
-**Vercel (frontend):**
-1. Import `frontend/` as the project root.
-2. Set `NEXT_PUBLIC_API_URL` to your Render backend's public URL.
-3. Deploy. `next.config.ts`'s CSP already scopes `connect-src` to that same origin.
-
-## Known limitations
-
-Documented in full, with reasoning, in
-[ARCHITECTURE.md § Known limitations](ARCHITECTURE.md#known-limitations) — summary: single admin
-user with no role model, in-memory (non-distributed) rate limiter, no session revocation short of
-rotating the signing secret, and no automated test suite (verification has been manual, end-to-end,
-against real Twilio + Gemini calls).
-
-## Further reading
-
-- [ARCHITECTURE.md](ARCHITECTURE.md) — full system design, data flow, ER diagram, security model
-- [database/README.md](database/README.md) — schema notes
+1. Render web service, root `backend/`, build `pip install -e .`, start `python -m audiocall.main`.
+   Set every variable from `backend/.env.example`, with `SERVER_HOST=<app>.onrender.com`,
+   `USE_TLS=true` and `FRONTEND_ORIGIN=<vercel url>`. Use `DATABASE_URL` in the
+   `postgresql+asyncpg://` form.
+2. Run `python -m alembic upgrade head` and `python scripts/create_admin.py <user> <pass>` once.
+3. Vercel: import `frontend/`, set `NEXT_PUBLIC_API_URL` to the Render URL.
