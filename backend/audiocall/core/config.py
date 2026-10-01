@@ -35,11 +35,24 @@ HTTP_SCHEME = "https" if USE_TLS else "http"
 # The Next.js dashboard's origin, for CORS.
 FRONTEND_ORIGIN: str = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
 
-# How long (seconds) with no customer speech before we log a silence warning.
-SILENCE_WARNING_SECONDS = 15
+# How long (seconds) Twilio lets the customer's phone ring before giving up
+# (reported back as no-answer).
+RING_TIMEOUT_SECONDS = int(os.environ.get("RING_TIMEOUT_SECONDS", "30"))
+
+# Silence handling: after SILENCE_PROMPT_SECONDS without customer speech the
+# agent checks in ("are you still there?"); after SILENCE_HANGUP_SECONDS the
+# call is ended politely and flagged `customer_silent`.
+SILENCE_PROMPT_SECONDS = int(os.environ.get("SILENCE_PROMPT_SECONDS", "10"))
+SILENCE_HANGUP_SECONDS = int(os.environ.get("SILENCE_HANGUP_SECONDS", "30"))
+# Kept for the log line in the stream bridge.
+SILENCE_WARNING_SECONDS = SILENCE_PROMPT_SECONDS
 # How many barge-in interruptions in one call before we flag it as an
 # "excessive interruption loop" error reason.
 INTERRUPTION_THRESHOLD = 8
+
+# Hard cap on a single conversation, so a stuck call can't run (and bill)
+# forever.
+MAX_CALL_SECONDS = int(os.environ.get("MAX_CALL_SECONDS", "600"))
 
 # ── Admin auth ───────────────────────────────────────────────────────────────
 # Signs/verifies the session cookie issued by POST /api/auth/login. Must be a

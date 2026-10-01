@@ -2,15 +2,14 @@
 -- PostgreSQL database dump
 --
 
-\restrict aEUc0kkeAJN2VT8hRh188xn5Kg4RN4u3EwB0J0ARVqbh9c6wznXgsMlMgemResw
+\restrict uvCwzU3u1tPkRy9q2Hj2szFMbnRiTriuXgwxApIpYi2OdsqzzDk9uhOC21unkeL
 
--- Dumped from database version 17.7
--- Dumped by pg_dump version 17.7
+-- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
+-- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
-SET transaction_timeout = 0;
 SET client_encoding = 'UTF8';
 SET standard_conforming_strings = on;
 SELECT pg_catalog.set_config('search_path', '', false);
@@ -45,6 +44,39 @@ CREATE TABLE public.alembic_version (
 
 
 --
+-- Name: business_profiles; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.business_profiles (
+    id uuid NOT NULL,
+    name text NOT NULL,
+    agent_name text NOT NULL,
+    industry text,
+    description text,
+    products text,
+    call_objective text NOT NULL,
+    greeting text,
+    language text,
+    fields jsonb NOT NULL,
+    is_default boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: call_events; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.call_events (
+    id uuid NOT NULL,
+    call_id uuid NOT NULL,
+    event_type text NOT NULL,
+    detail text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
 -- Name: call_summaries; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -57,7 +89,9 @@ CREATE TABLE public.call_summaries (
     important_points jsonb,
     follow_up boolean,
     lead_status text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    follow_up_notes text,
+    call_outcome text
 );
 
 
@@ -75,7 +109,10 @@ CREATE TABLE public.calls (
     end_time timestamp with time zone,
     duration_seconds integer,
     error_reason text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    profile_id uuid,
+    channel text DEFAULT 'phone'::text NOT NULL,
+    outcome text
 );
 
 
@@ -101,7 +138,10 @@ CREATE TABLE public.customers (
     name text NOT NULL,
     phone text NOT NULL,
     company text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    purpose text,
+    product text,
+    profile_id uuid
 );
 
 
@@ -119,7 +159,8 @@ CREATE TABLE public.requirements (
     location text,
     budget text,
     timeline text,
-    additional_requirements text
+    additional_requirements text,
+    fields jsonb
 );
 
 
@@ -145,6 +186,22 @@ ALTER TABLE ONLY public.admin_users
 
 ALTER TABLE ONLY public.alembic_version
     ADD CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num);
+
+
+--
+-- Name: business_profiles business_profiles_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.business_profiles
+    ADD CONSTRAINT business_profiles_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: call_events call_events_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.call_events
+    ADD CONSTRAINT call_events_pkey PRIMARY KEY (id);
 
 
 --
@@ -212,10 +269,31 @@ ALTER TABLE ONLY public.requirements
 
 
 --
+-- Name: ix_call_events_call_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_call_events_call_id ON public.call_events USING btree (call_id);
+
+
+--
 -- Name: ix_calls_customer_id; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_calls_customer_id ON public.calls USING btree (customer_id);
+
+
+--
+-- Name: ix_calls_outcome; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_calls_outcome ON public.calls USING btree (outcome);
+
+
+--
+-- Name: ix_calls_profile_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_calls_profile_id ON public.calls USING btree (profile_id);
 
 
 --
@@ -230,6 +308,28 @@ CREATE INDEX ix_calls_status ON public.calls USING btree (status);
 --
 
 CREATE INDEX ix_conversation_messages_call_id ON public.conversation_messages USING btree (call_id);
+
+
+--
+-- Name: ix_customers_profile_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_customers_profile_id ON public.customers USING btree (profile_id);
+
+
+--
+-- Name: uq_business_profiles_one_default; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_business_profiles_one_default ON public.business_profiles USING btree (is_default) WHERE is_default;
+
+
+--
+-- Name: call_events call_events_call_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.call_events
+    ADD CONSTRAINT call_events_call_id_fkey FOREIGN KEY (call_id) REFERENCES public.calls(id);
 
 
 --
@@ -249,11 +349,27 @@ ALTER TABLE ONLY public.calls
 
 
 --
+-- Name: calls calls_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.calls
+    ADD CONSTRAINT calls_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.business_profiles(id) ON DELETE SET NULL;
+
+
+--
 -- Name: conversation_messages conversation_messages_call_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.conversation_messages
     ADD CONSTRAINT conversation_messages_call_id_fkey FOREIGN KEY (call_id) REFERENCES public.calls(id);
+
+
+--
+-- Name: customers customers_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customers
+    ADD CONSTRAINT customers_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.business_profiles(id) ON DELETE SET NULL;
 
 
 --
@@ -268,5 +384,5 @@ ALTER TABLE ONLY public.requirements
 -- PostgreSQL database dump complete
 --
 
-\unrestrict aEUc0kkeAJN2VT8hRh188xn5Kg4RN4u3EwB0J0ARVqbh9c6wznXgsMlMgemResw
+\unrestrict uvCwzU3u1tPkRy9q2Hj2szFMbnRiTriuXgwxApIpYi2OdsqzzDk9uhOC21unkeL
 

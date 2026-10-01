@@ -27,3 +27,15 @@ audiocall = "audiocall.main:main"
 # subpackages (audiocall.db, audiocall.services, audiocall.api, audiocall.core)
 # rather than picking up `alembic` as a second top-level package.
 include = ["audiocall*"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]

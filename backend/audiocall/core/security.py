@@ -87,3 +87,33 @@ def verify_twilio_signature(url: str, params: dict[str, str], signature: str) ->
     """
     validator = RequestValidator(config.TWILIO_AUTH_TOKEN)
     return validator.validate(url, params, signature)
+
+
+# ── Browser call stream tokens ──────────────────────────────────────────────
+# The browser demo channel's WebSocket can't rely on the session cookie (the
+# dashboard and API are usually on different sites in production), so
+# `POST /api/calls/browser` — itself admin-only — hands out a short-lived
+# token bound to one call_id.
+STREAM_TOKEN_TTL_SECONDS = 120
+
+
+def create_stream_token(call_id: object) -> str:
+    expiry = int(time.time()) + STREAM_TOKEN_TTL_SECONDS
+    payload = f"stream:{call_id}:{expiry}"
+    return base64.urlsafe_b64encode(f"{payload}:{_sign(payload)}".encode()).decode()
+
+
+def verify_stream_token(token: str, call_id: object) -> bool:
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        prefix, token_call_id, expiry_str, signature = decoded.split(":", 3)
+        expiry = int(expiry_str)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    payload = f"{prefix}:{token_call_id}:{expiry}"
+    return (
+        prefix == "stream"
+        and token_call_id == str(call_id)
+        and hmac.compare_digest(signature, _sign(payload))
+        and time.time() <= expiry
+    )

@@ -1,9 +1,16 @@
 """SQLAlchemy 2.0 declarative models for the RO sales voice-agent platform.
 
 Schema:
-    customers -> calls -> conversation_messages
-                       -> requirements (1:1)
-                       -> call_summaries (1:1)
+    business_profiles -> customers -> calls -> conversation_messages
+                                            -> call_events
+                                            -> requirements (1:1)
+                                            -> call_summaries (1:1)
+
+A business profile configures the agent for one business: its persona, what
+it sells, the call objective, and the list of fields to collect. Every call
+snapshots the profile it ran with (`calls.profile_id`), so the dashboard can
+render that call's requirements with the right labels even if the customer is
+later moved to a different profile.
 """
 
 from __future__ import annotations
@@ -11,13 +18,45 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, ForeignKey, Integer, Text, func
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class BusinessProfile(Base):
+    __tablename__ = "business_profiles"
+    __table_args__ = (
+        # At most one default profile.
+        Index(
+            "uq_business_profiles_one_default",
+            "is_default",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)  # business name
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    industry: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text)  # what the business does
+    products: Mapped[str | None] = mapped_column(Text)  # catalogue / offerings, free text
+    call_objective: Mapped[str] = mapped_column(Text, nullable=False)
+    greeting: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(Text)  # None = mirror the customer
+    # [{"key": "ro_capacity", "label": "RO Capacity", "description": "...",
+    #   "required": true}, ...] — the agent's checklist for the call.
+    fields: Mapped[list] = mapped_column(JSONB, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class Customer(Base):
@@ -29,11 +68,18 @@ class Customer(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     phone: Mapped[str] = mapped_column(Text, nullable=False)  # E.164
     company: Mapped[str | None] = mapped_column(Text)
+    purpose: Mapped[str | None] = mapped_column(Text)  # e.g. "Product enquiry"
+    product: Mapped[str | None] = mapped_column(Text)  # e.g. "Commercial RO System"
+    # NULL = use the default business profile.
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("business_profiles.id", ondelete="SET NULL"), index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
     calls: Mapped[list["Call"]] = relationship(back_populates="customer")
+    profile: Mapped["BusinessProfile | None"] = relationship()
 
 
 class Call(Base):
@@ -48,8 +94,14 @@ class Call(Base):
     customer_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("customers.id"), nullable=False, index=True
     )
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("business_profiles.id", ondelete="SET NULL"), index=True
+    )
     twilio_call_sid: Mapped[str | None] = mapped_column(Text, unique=True)
     direction: Mapped[str | None] = mapped_column(Text)  # outbound | inbound
+    channel: Mapped[str] = mapped_column(
+        Text, nullable=False, default="phone", server_default="phone"
+    )  # phone (Twilio) | browser (WebRTC demo mode)
     status: Mapped[str | None] = mapped_column(
         Text, index=True
     )  # queued|ringing|in_progress|completed|failed|no_answer|disconnected
@@ -57,11 +109,20 @@ class Call(Base):
     end_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     duration_seconds: Mapped[int | None] = mapped_column(Integer)
     error_reason: Mapped[str | None] = mapped_column(Text)
+    # Business result of the call, derived from status + AI analysis — see
+    # services/outcome.py for the vocabulary.
+    outcome: Mapped[str | None] = mapped_column(Text, index=True)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
     customer: Mapped["Customer"] = relationship(back_populates="calls")
+    profile: Mapped["BusinessProfile | None"] = relationship()
+    events: Mapped[list["CallEvent"]] = relationship(
+        back_populates="call",
+        cascade="all, delete-orphan",
+        order_by="CallEvent.created_at",
+    )
     messages: Mapped[list["ConversationMessage"]] = relationship(
         back_populates="call",
         cascade="all, delete-orphan",
@@ -91,6 +152,27 @@ class ConversationMessage(Base):
     call: Mapped["Call"] = relationship(back_populates="messages")
 
 
+class CallEvent(Base):
+    """Notable things that happened during a call — errors, silences,
+    interruptions, agent tool actions — so they're auditable afterwards."""
+
+    __tablename__ = "call_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    call_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("calls.id"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    call: Mapped["Call"] = relationship(back_populates="events")
+
+
 class Requirement(Base):
     __tablename__ = "requirements"
 
@@ -108,6 +190,10 @@ class Requirement(Base):
     budget: Mapped[str | None] = mapped_column(Text)
     timeline: Mapped[str | None] = mapped_column(Text)
     additional_requirements: Mapped[str | None] = mapped_column(Text)
+    # Every collected field keyed by the profile's field key — the generic
+    # store that works for any business profile. The fixed columns above are
+    # also filled when a key matches, for the default RO profile.
+    fields: Mapped[dict | None] = mapped_column(JSONB)
 
     call: Mapped["Call"] = relationship(back_populates="requirements")
 
@@ -126,6 +212,8 @@ class CallSummary(Base):
     key_requirements: Mapped[dict | None] = mapped_column(JSONB)
     important_points: Mapped[dict | None] = mapped_column(JSONB)
     follow_up: Mapped[bool | None] = mapped_column(Boolean)
+    follow_up_notes: Mapped[str | None] = mapped_column(Text)
+    call_outcome: Mapped[str | None] = mapped_column(Text)  # one-sentence AI description
     lead_status: Mapped[str | None] = mapped_column(Text)  # interested | not_interested | uncertain
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
