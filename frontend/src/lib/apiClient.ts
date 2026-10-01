@@ -1,4 +1,7 @@
 import type {
+  BrowserCallStartResponse,
+  BusinessProfile,
+  BusinessProfileInput,
   CallDetail,
   CallListItem,
   CallStartResponse,
@@ -11,6 +14,8 @@ import type {
 } from "@/types/api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+/** WebSocket origin of the same backend (http→ws, https→wss), no trailing slash. */
+export const API_WS_BASE_URL = API_BASE_URL.replace(/^http/, "ws").replace(/\/+$/, "");
 
 export class ApiError extends Error {
   status: number;
@@ -64,8 +69,21 @@ async function request<T>(
   if (!res.ok) {
     let detail = res.statusText;
     try {
-      const data = (await res.json()) as { detail?: string };
-      detail = data.detail ?? detail;
+      const data = (await res.json()) as {
+        detail?: string | { msg?: string; loc?: (string | number)[] }[];
+      };
+      if (Array.isArray(data.detail)) {
+        // FastAPI validation errors: [{loc: ["body", "phone"], msg: "..."}]
+        detail = data.detail
+          .map((item) => {
+            const field = item.loc?.filter((part) => part !== "body").join(".");
+            const msg = (item.msg ?? "Invalid value").replace(/^Value error, /, "");
+            return field ? `${field}: ${msg}` : msg;
+          })
+          .join("; ");
+      } else {
+        detail = data.detail ?? detail;
+      }
     } catch {
       // Response wasn't JSON — fall back to statusText.
     }
@@ -87,6 +105,10 @@ export interface CallListFilters {
   date_from?: string;
   date_to?: string;
   customer_name?: string;
+  follow_up?: string;
+  outcome?: string;
+  channel?: string;
+  profile_id?: string;
   [key: string]: string | number | undefined;
 }
 
@@ -113,6 +135,26 @@ export function makeApiClient(cookieHeader?: string) {
     updateCustomer: (id: string, input: CustomerUpdateInput) =>
       request<Customer>(`/api/customers/${id}`, { method: "PATCH", body: input }, cookieHeader),
 
+    listProfiles: () => request<BusinessProfile[]>("/api/profiles", {}, cookieHeader),
+    getProfile: (id: string) =>
+      request<BusinessProfile>(`/api/profiles/${id}`, {}, cookieHeader),
+    createProfile: (input: BusinessProfileInput) =>
+      request<BusinessProfile>("/api/profiles", { method: "POST", body: input }, cookieHeader),
+    updateProfile: (id: string, input: Partial<BusinessProfileInput>) =>
+      request<BusinessProfile>(
+        `/api/profiles/${id}`,
+        { method: "PATCH", body: input },
+        cookieHeader,
+      ),
+    deleteProfile: (id: string) =>
+      request<void>(`/api/profiles/${id}`, { method: "DELETE" }, cookieHeader),
+
+    startBrowserCall: (customerId: string) =>
+      request<BrowserCallStartResponse>(
+        "/api/calls/browser",
+        { method: "POST", body: { customer_id: customerId } },
+        cookieHeader,
+      ),
     startCall: (customerId: string) =>
       request<CallStartResponse>(
         "/api/calls",

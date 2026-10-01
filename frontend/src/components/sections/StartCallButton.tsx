@@ -41,7 +41,7 @@ export function StartCallButton({ customerId }: { customerId: string }) {
         onClick={handleClick}
         disabled={isStarting || isPolling}
       >
-        {isStarting ? "Starting…" : callId ? "Call again" : "Start call"}
+        {isStarting ? "Dialling…" : callId ? "Call again" : "Phone call"}
       </Button>
       {status ? <CallStatusBadge status={status} /> : null}
       {error ? (

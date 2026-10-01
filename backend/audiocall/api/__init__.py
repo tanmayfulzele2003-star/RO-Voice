@@ -2,10 +2,11 @@
 
 from fastapi import APIRouter
 
-from audiocall.api import auth, calls, customers, stats
+from audiocall.api import auth, calls, customers, profiles, stats
 
 api_router = APIRouter()
 api_router.include_router(auth.router)
 api_router.include_router(customers.router)
+api_router.include_router(profiles.router)
 api_router.include_router(calls.router)
 api_router.include_router(stats.router)

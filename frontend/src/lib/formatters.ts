@@ -26,3 +26,39 @@ export function formatStatusLabel(status: string): string {
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");
 }
+
+const EVENT_LABELS: Record<string, string> = {
+  call_initiated: "Call initiated",
+  call_status: "Provider status",
+  provider_error: "Calling provider error",
+  invalid_number: "Invalid phone number",
+  stream_started: "Conversation started",
+  stream_ended: "Conversation ended",
+  customer_silence: "Customer silent — agent checked in",
+  silence_timeout: "No response — call ended",
+  interruption: "Customer interrupted",
+  speech_not_recognized: "Speech not recognised",
+  customer_hung_up: "Customer hung up",
+  ai_error: "AI failure",
+  field_collected: "Information collected",
+  agent_end_call: "Agent ended call",
+  max_duration: "Time limit reached",
+  analysis_failed: "AI summary failed",
+};
+
+export function formatEventType(eventType: string): string {
+  return EVENT_LABELS[eventType] ?? formatStatusLabel(eventType);
+}
+
+const ERROR_EVENTS = new Set([
+  "provider_error",
+  "invalid_number",
+  "ai_error",
+  "analysis_failed",
+  "silence_timeout",
+  "speech_not_recognized",
+]);
+
+export function isErrorEvent(eventType: string): boolean {
+  return ERROR_EVENTS.has(eventType);
+}

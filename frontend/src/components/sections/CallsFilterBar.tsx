@@ -15,9 +15,59 @@ const STATUS_OPTIONS = [
 
 const LEAD_STATUS_OPTIONS = ["interested", "not_interested", "uncertain"] as const;
 
+const OUTCOME_OPTIONS: { value: string; label: string }[] = [
+  { value: "qualified", label: "Qualified lead" },
+  { value: "not_interested", label: "Not interested" },
+  { value: "callback", label: "Call back" },
+  { value: "incomplete", label: "Incomplete" },
+  { value: "no_answer", label: "No answer" },
+  { value: "no_conversation", label: "No conversation" },
+  { value: "failed", label: "Failed" },
+];
+
+const SELECT_CLASS =
+  "rounded-lg border border-border bg-card px-3 py-2 text-sm text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary";
+
+function FilterSelect({
+  id,
+  label,
+  value,
+  onChange,
+  options,
+  allLabel,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: { value: string; label: string }[];
+  allLabel: string;
+}) {
+  return (
+    <div>
+      <label htmlFor={id} className="mb-1.5 block text-sm font-medium text-foreground">
+        {label}
+      </label>
+      <select
+        id={id}
+        defaultValue={value}
+        onChange={(event) => onChange(event.target.value)}
+        className={SELECT_CLASS}
+      >
+        <option value="">{allLabel}</option>
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 const SEARCH_DEBOUNCE_MS = 400;
 
-export function CallsFilterBar() {
+export function CallsFilterBar({ profiles }: { profiles: { id: string; name: string }[] }) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -108,6 +158,50 @@ export function CallsFilterBar() {
           ))}
         </select>
       </div>
+
+      <FilterSelect
+        id="outcome"
+        label="Outcome"
+        value={searchParams.get("outcome") ?? ""}
+        onChange={(value) => updateParams({ outcome: value })}
+        options={OUTCOME_OPTIONS}
+        allLabel="All outcomes"
+      />
+
+      <FilterSelect
+        id="follow_up"
+        label="Follow-up"
+        value={searchParams.get("follow_up") ?? ""}
+        onChange={(value) => updateParams({ follow_up: value })}
+        options={[
+          { value: "true", label: "Required" },
+          { value: "false", label: "Not required" },
+        ]}
+        allLabel="Any"
+      />
+
+      <FilterSelect
+        id="channel"
+        label="Channel"
+        value={searchParams.get("channel") ?? ""}
+        onChange={(value) => updateParams({ channel: value })}
+        options={[
+          { value: "phone", label: "Phone" },
+          { value: "browser", label: "Browser" },
+        ]}
+        allLabel="All channels"
+      />
+
+      {profiles.length > 1 ? (
+        <FilterSelect
+          id="profile_id"
+          label="Business"
+          value={searchParams.get("profile_id") ?? ""}
+          onChange={(value) => updateParams({ profile_id: value })}
+          options={profiles.map((p) => ({ value: p.id, label: p.name }))}
+          allLabel="All businesses"
+        />
+      ) : null}
 
       <div>
         <label htmlFor="date_from" className="mb-1.5 block text-sm font-medium text-foreground">

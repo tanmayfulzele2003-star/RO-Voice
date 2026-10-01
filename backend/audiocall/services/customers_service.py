@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 from sqlalchemy import func, select
 
@@ -24,31 +25,24 @@ async def get_customer(customer_id: uuid.UUID) -> Customer | None:
         return await session.get(Customer, customer_id)
 
 
-async def create_customer(name: str, phone: str, company: str | None = None) -> Customer:
+async def create_customer(data: dict[str, Any]) -> Customer:
     async with get_session_factory()() as session:
-        customer = Customer(name=name, phone=phone, company=company)
+        customer = Customer(**data)
         session.add(customer)
         await session.commit()
         await session.refresh(customer)
         return customer
 
 
-async def update_customer(
-    customer_id: uuid.UUID,
-    name: str | None = None,
-    phone: str | None = None,
-    company: str | None = None,
-) -> Customer | None:
+async def update_customer(customer_id: uuid.UUID, data: dict[str, Any]) -> Customer | None:
+    """Apply only the fields present in `data` (PATCH semantics — an explicit
+    null clears an optional field)."""
     async with get_session_factory()() as session:
         customer = await session.get(Customer, customer_id)
         if customer is None:
             return None
-        if name is not None:
-            customer.name = name
-        if phone is not None:
-            customer.phone = phone
-        if company is not None:
-            customer.company = company
+        for key, value in data.items():
+            setattr(customer, key, value)
         await session.commit()
         await session.refresh(customer)
         return customer

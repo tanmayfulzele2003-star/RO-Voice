@@ -7,7 +7,7 @@ import { ErrorState } from "@/components/ui/States";
 import { ApiError } from "@/lib/apiClient";
 import { redirectIfUnauthenticated } from "@/lib/auth";
 import { getServerApiClient } from "@/lib/serverApiClient";
-import type { Customer } from "@/types/api";
+import type { BusinessProfile, Customer } from "@/types/api";
 
 export const metadata: Metadata = {
   title: "Edit customer",
@@ -21,11 +21,12 @@ export default async function EditCustomerPage({
   const { id } = await params;
 
   let customer: Customer | null = null;
+  let profiles: BusinessProfile[] = [];
   let loadError: string | null = null;
 
   try {
     const apiClient = await getServerApiClient();
-    customer = await apiClient.getCustomer(id);
+    [customer, profiles] = await Promise.all([apiClient.getCustomer(id), apiClient.listProfiles()]);
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       notFound();
@@ -40,7 +41,7 @@ export default async function EditCustomerPage({
         <ErrorState message={loadError ?? "Failed to load customer."} />
       ) : (
         <Card className="max-w-lg">
-          <CustomerForm mode="edit" customer={customer} />
+          <CustomerForm mode="edit" customer={customer} profiles={profiles} />
         </Card>
       )}
     </PageShell>

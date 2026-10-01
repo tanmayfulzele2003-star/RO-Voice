@@ -16,9 +16,13 @@ from google.genai import types
 from openai import AsyncOpenAI
 from sqlalchemy import select
 
-from audiocall.db.models import CallSummary, ConversationMessage, Requirement
+from audiocall import conversation
+from audiocall.db.models import Call, CallSummary, ConversationMessage, Requirement
 from audiocall.db.session import get_session_factory
 from audiocall.schemas import CallAnalysis
+from audiocall.services import calls_service, events_service, profiles_service
+from audiocall.services.outcome import outcome_from_analysis
+from audiocall.services.requirements_service import apply_fields
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +39,33 @@ _NVIDIA_BASE_URL = os.environ.get("NVIDIA_BASE_URL", "https://integrate.api.nvid
 _NVIDIA_MODEL = os.environ.get("NVIDIA_SUMMARY_MODEL", "nvidia/nemotron-3-super-120b-a12b")
 
 _EXTRACTION_INSTRUCTION = (
-    "You are analyzing a transcript of a phone call between an RO (reverse-osmosis "
-    "water system) sales agent (AI) and a customer. Extract the customer's stated "
-    "requirements and produce a short summary and lead assessment.\n\n"
-    "Only use information actually present in the transcript — leave a field null "
+    "You are analysing the transcript of a phone call between an AI agent calling on "
+    "behalf of a business and a customer. Extract the customer's stated details for each "
+    "checklist field and produce a short summary and lead assessment.\n\n"
+    "Business: {business}\nCall objective: {objective}\n\n"
+    "Checklist fields (return one `fields` entry per key, in this order):\n{fields}\n\n"
+    "Only use information actually present in the transcript — set value to null "
     "if the customer never provided it. Do not guess or invent values.\n\n"
     "lead_status must be one of: interested, not_interested, uncertain.\n"
     "follow_up_required is true if the sales team should follow up with this "
     "customer (e.g. they showed interest but the call ended before finishing, or "
     "they asked to be contacted later), false if there's clearly nothing further "
-    "to do (e.g. they explicitly said not interested).\n"
+    "to do (e.g. they explicitly said not interested). follow_up_notes says what "
+    "the follow-up should cover.\n"
+    "key_requirements: the customer's main needs as short bullet strings.\n"
+    "important_points: other notable things said (objections, questions, preferences).\n"
+    "call_outcome: one sentence on how the call ended and what was agreed.\n"
     "summary must be a coherent 2-4 sentence human summary of the call, not a "
     "restatement of the JSON fields."
 )
+
+
+def build_instruction(profile: dict) -> str:
+    return _EXTRACTION_INSTRUCTION.format(
+        business=profile["name"],
+        objective=profile["call_objective"],
+        fields=conversation.format_fields_for_prompt(profile["fields"]),
+    )
 
 
 def _client() -> genai.Client:
@@ -78,22 +96,22 @@ async def build_transcript_text(call_id: uuid.UUID) -> str:
     return "\n".join(lines)
 
 
-async def analyze_call(transcript_text: str) -> CallAnalysis:
+async def analyze_call(transcript_text: str, instruction: str) -> CallAnalysis:
     """One non-live text call, constrained to the CallAnalysis JSON shape.
 
     Backend selected by SUMMARY_PROVIDER — "gemini" (default) or "nvidia".
     """
     if _SUMMARY_PROVIDER == "nvidia":
-        return await _analyze_call_nvidia(transcript_text)
-    return await _analyze_call_gemini(transcript_text)
+        return await _analyze_call_nvidia(transcript_text, instruction)
+    return await _analyze_call_gemini(transcript_text, instruction)
 
 
-async def _analyze_call_gemini(transcript_text: str) -> CallAnalysis:
+async def _analyze_call_gemini(transcript_text: str, instruction: str) -> CallAnalysis:
     response = await _client().aio.models.generate_content(
         model=_SUMMARY_MODEL,
         contents=f"Transcript:\n{transcript_text}",
         config=types.GenerateContentConfig(
-            system_instruction=_EXTRACTION_INSTRUCTION,
+            system_instruction=instruction,
             response_mime_type="application/json",
             response_schema=CallAnalysis,
         ),
@@ -101,7 +119,7 @@ async def _analyze_call_gemini(transcript_text: str) -> CallAnalysis:
     return CallAnalysis.model_validate_json(response.text)
 
 
-async def _analyze_call_nvidia(transcript_text: str) -> CallAnalysis:
+async def _analyze_call_nvidia(transcript_text: str, instruction: str) -> CallAnalysis:
     # NIM models don't accept a Pydantic response_schema like google-genai
     # does — fall back to JSON-object mode plus the schema spelled out in the
     # prompt, generated from CallAnalysis itself so the two never drift apart.
@@ -112,7 +130,7 @@ async def _analyze_call_nvidia(transcript_text: str) -> CallAnalysis:
             {
                 "role": "system",
                 "content": (
-                    f"{_EXTRACTION_INSTRUCTION}\n\n"
+                    f"{instruction}\n\n"
                     "Respond with ONLY a single JSON object matching this JSON "
                     f"Schema, no surrounding text or markdown fences:\n{schema_hint}"
                 ),
@@ -126,22 +144,18 @@ async def _analyze_call_nvidia(transcript_text: str) -> CallAnalysis:
 
 
 async def persist_analysis(call_id: uuid.UUID, analysis: CallAnalysis) -> None:
-    """Upsert into `requirements` and `call_summaries` (both unique on call_id)."""
+    """Upsert into `requirements` and `call_summaries` (both unique on call_id),
+    and set the call's outcome from the lead assessment."""
     async with get_session_factory()() as session:
         requirement = await session.scalar(
             select(Requirement).where(Requirement.call_id == call_id)
         )
         if requirement is None:
-            requirement = Requirement(call_id=call_id)
+            requirement = Requirement(call_id=call_id, fields={})
             session.add(requirement)
-        requirement.customer_name = analysis.customer_name
-        requirement.company_name = analysis.company_name
-        requirement.requirement = analysis.requirement
-        requirement.ro_capacity = analysis.ro_capacity
-        requirement.location = analysis.location
-        requirement.budget = analysis.budget
-        requirement.timeline = analysis.timeline
-        requirement.additional_requirements = analysis.additional_requirements
+        # Merges over what the agent saved live during the call; a null from
+        # the extraction never erases a live-collected value.
+        apply_fields(requirement, analysis.field_values())
 
         summary = await session.scalar(
             select(CallSummary).where(CallSummary.call_id == call_id)
@@ -154,7 +168,13 @@ async def persist_analysis(call_id: uuid.UUID, analysis: CallAnalysis) -> None:
         summary.key_requirements = analysis.key_requirements
         summary.important_points = analysis.important_points
         summary.follow_up = analysis.follow_up_required
+        summary.follow_up_notes = analysis.follow_up_notes
+        summary.call_outcome = analysis.call_outcome
         summary.lead_status = analysis.lead_status
+
+        call = await session.get(Call, call_id)
+        if call is not None and call.status != "failed":
+            call.outcome = outcome_from_analysis(analysis.lead_status)
 
         await session.commit()
 
@@ -167,7 +187,10 @@ async def _persist_failure_summary(call_id: uuid.UUID, reason: str) -> None:
         if summary is None:
             summary = CallSummary(call_id=call_id)
             session.add(summary)
-        summary.summary = f"Analysis failed: {reason}"
+        summary.summary = (
+            "AI summary could not be generated. The lead status and follow-up shown are "
+            f"the agent's own end-of-call assessment. ({reason})"
+        )
         await session.commit()
 
 
@@ -188,19 +211,31 @@ async def post_call_processing(call_id: uuid.UUID) -> None:
         logger.info("Call %s has an empty transcript — skipping AI analysis", call_id)
         return
 
+    try:
+        context = await calls_service.load_call_context(call_id)
+        profile = context["profile"] if context else calls_service.profile_to_dict(
+            await profiles_service.get_default_profile()
+        )
+    except Exception:
+        logger.exception("Call %s: failed to load business profile for analysis", call_id)
+        return
+    instruction = build_instruction(profile)
+
     last_error: Exception | None = None
     for attempt in (1, 2):
         try:
-            analysis = await analyze_call(transcript_text)
+            analysis = await analyze_call(transcript_text, instruction)
             await persist_analysis(call_id, analysis)
             logger.info("Call %s: analysis persisted (attempt %d)", call_id, attempt)
             return
         except Exception as exc:  # noqa: BLE001 - retry+record any SDK/validation failure
-            last_error = exc
+            last_error = exc if str(exc) else RuntimeError(type(exc).__name__)
             logger.warning("Call %s: analysis attempt %d failed: %s", call_id, attempt, exc)
 
     logger.error("Call %s: analysis failed after retry: %s", call_id, last_error)
+    reason = f"{type(last_error).__name__}: {last_error}"[:500]
+    await events_service.record(call_id, "analysis_failed", reason)
     try:
-        await _persist_failure_summary(call_id, str(last_error))
+        await _persist_failure_summary(call_id, reason)
     except Exception:
         logger.exception("Call %s: failed to persist failure summary", call_id)

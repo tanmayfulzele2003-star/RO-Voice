@@ -1,34 +1,44 @@
 import { Card } from "@/components/ui/Card";
-import type { Requirements } from "@/types/api";
+import type { ProfileField, Requirements } from "@/types/api";
 
-const FIELDS: { key: keyof Requirements; label: string }[] = [
-  { key: "customer_name", label: "Customer name" },
-  { key: "company_name", label: "Company" },
-  { key: "requirement", label: "Requirement" },
-  { key: "ro_capacity", label: "RO capacity" },
-  { key: "location", label: "Location" },
-  { key: "budget", label: "Budget" },
-  { key: "timeline", label: "Timeline" },
-  { key: "additional_requirements", label: "Additional requirements" },
-];
+/**
+ * Collected requirements, labelled by the business profile the call ran
+ * with. Values fill in live while the call is running (the agent saves each
+ * one as it hears it) and are completed by post-call AI analysis.
+ */
+export function RequirementsCard({
+  requirements,
+  fields,
+}: {
+  requirements: Requirements | null;
+  fields: ProfileField[];
+}) {
+  const values: Record<string, string> = requirements?.fields ?? {};
+  // Show everything the profile asks for, plus anything collected under a key
+  // the profile no longer has (e.g. the profile was edited after the call).
+  const rows = [
+    ...fields.map((f) => ({ key: f.key, label: f.label })),
+    ...Object.keys(values)
+      .filter((key) => !fields.some((f) => f.key === key))
+      .map((key) => ({ key, label: key.replace(/_/g, " ") })),
+  ];
 
-export function RequirementsCard({ requirements }: { requirements: Requirements | null }) {
   return (
     <Card>
-      <h2 className="mb-3 text-sm font-semibold text-foreground">Requirements</h2>
+      <h2 className="mb-3 text-sm font-semibold text-foreground">Customer requirements</h2>
       {requirements ? (
         <dl className="grid grid-cols-1 gap-3 @sm:grid-cols-2">
-          {FIELDS.map(({ key, label }) => (
+          {rows.map(({ key, label }) => (
             <div key={key}>
-              <dt className="text-xs text-muted-foreground">{label}</dt>
-              <dd className="text-sm text-foreground">{requirements[key] || "—"}</dd>
+              <dt className="text-xs capitalize text-muted-foreground">{label}</dt>
+              <dd className="text-sm text-foreground">{values[key] || "—"}</dd>
             </div>
           ))}
         </dl>
       ) : (
         <p className="text-sm text-muted-foreground">
-          No structured requirements were captured yet — this appears shortly after the call
-          ends, once AI analysis finishes.
+          No requirements were captured yet — they fill in during the call and are completed by
+          AI analysis shortly after it ends.
         </p>
       )}
     </Card>
