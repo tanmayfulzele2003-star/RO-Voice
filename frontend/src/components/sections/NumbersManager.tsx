@@ -9,6 +9,7 @@ import { Field, Input } from "@/components/ui/Input";
 import { EmptyState } from "@/components/ui/States";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/Table";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 import { formatDateTime, formatPhone } from "@/lib/formatters";
 import type { PhoneNumber, PhoneNumberInput } from "@/types/api";
 
@@ -43,7 +44,7 @@ export function NumbersManager({
 
   function errorText(err: unknown, fallback: string) {
     if (err instanceof ApiError && err.status === 401) {
-      router.push("/login");
+      endSession();
       return null;
     }
     return err instanceof ApiError ? err.message : fallback;

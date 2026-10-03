@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 import type { BusinessProfile, ProfileField } from "@/types/api";
 
 const profileSchema = z.object({
@@ -115,7 +116,7 @@ export function ProfileForm({ profile }: { profile?: BusinessProfile }) {
         router.refresh();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
-          router.push("/login");
+          endSession();
           return;
         }
         setFormError(err instanceof ApiError ? err.message : "Unexpected error. Please try again.");

@@ -5,6 +5,7 @@ import { useMemo, useState, useTransition, type FormEvent } from "react";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 import { formatPhone } from "@/lib/formatters";
 import type { Customer } from "@/types/api";
 
@@ -94,7 +95,7 @@ export function CampaignForm({
         router.refresh();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
-          router.push("/login");
+          endSession();
           return;
         }
         setFormError(err instanceof ApiError ? err.message : "Unexpected error. Please try again.");

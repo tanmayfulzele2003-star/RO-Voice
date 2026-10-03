@@ -9,7 +9,7 @@ const SESSION_COOKIE_NAME = "audiocall_session";
 const PUBLIC_PATHS = ["/login"];
 // Reachable signed in or out: creating the first admin happens before anyone
 // can sign in.
-const OPEN_PATHS = ["/setup"];
+const OPEN_PATHS = ["/setup", "/join", "/session-expired"];
 
 /**
  * Fast, presence-only redirect: this does NOT cryptographically verify the

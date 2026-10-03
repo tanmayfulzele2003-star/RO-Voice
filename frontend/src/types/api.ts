@@ -184,9 +184,17 @@ export interface CallDetail {
   summary: CallSummary | null;
 }
 
-export interface LoginResponse {
+export type Role = "viewer" | "member" | "admin" | "owner";
+
+/** The signed-in user (GET /api/auth/me, and the login response). */
+export interface Me {
   username: string;
+  role: Role;
+  is_platform_admin: boolean;
+  organization: { id: string; name: string };
 }
+
+export type LoginResponse = Me;
 
 export interface StatsOverview {
   total_calls: number;
@@ -284,7 +292,7 @@ export interface SettingValue {
   /** Masked for secrets ("••••••••1234"). */
   value: string;
   is_set: boolean;
-  source: "dashboard" | "environment" | "unset";
+  source: "dashboard" | "organization" | "environment" | "unset";
 }
 
 export type SettingsView = Record<SettingKey, SettingValue>;
@@ -315,6 +323,8 @@ export interface ChecklistItem {
   label: string;
   done: boolean;
   hint: string;
+  /** Platform-wide step; only shown to the platform admin. */
+  platform: boolean;
 }
 
 export interface SetupChecklist {
@@ -328,4 +338,64 @@ export interface ProfileTemplate {
   title: string;
   summary: string;
   profile: Omit<BusinessProfileInput, "is_default" | "transfer_number">;
+}
+
+export type TwilioSettingKey = "twilio_account_sid" | "twilio_auth_token" | "twilio_phone_number";
+
+/** The company's own Twilio settings (GET /api/settings). */
+export interface OrgSettingsView {
+  settings: Record<TwilioSettingKey, SettingValue>;
+  /** No own account saved: calls go through the platform's Twilio account. */
+  uses_platform_twilio: boolean;
+  platform_twilio_available: boolean;
+}
+
+export interface Organization {
+  id: string;
+  name: string;
+  max_concurrent_calls: number | null;
+  created_at: string;
+}
+
+export interface TeamUser {
+  id: string;
+  username: string;
+  role: Role;
+  is_active: boolean;
+  is_platform_admin: boolean;
+  created_at: string;
+}
+
+export interface Invite {
+  id: string;
+  role: Role;
+  note: string | null;
+  expires_at: string;
+  created_at: string;
+}
+
+/** Returned once, when the invite is created. The link is /join?token=… */
+export interface InviteCreated extends Invite {
+  token: string;
+}
+
+export interface JoinInfo {
+  organization: string;
+  role: Role;
+  expires_at: string;
+}
+
+export interface PlatformOrganization {
+  id: string;
+  name: string;
+  is_active: boolean;
+  max_concurrent_calls: number | null;
+  users: number;
+  calls: number;
+  created_at: string;
+}
+
+export interface PlatformOrganizationCreated {
+  organization: PlatformOrganization;
+  owner_invite: InviteCreated;
 }

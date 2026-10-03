@@ -9,7 +9,7 @@ import { ErrorState } from "@/components/ui/States";
 import { ApiError } from "@/lib/apiClient";
 import { redirectIfUnauthenticated } from "@/lib/auth";
 import { getServerApiClient } from "@/lib/serverApiClient";
-import type { SettingsView } from "@/types/api";
+import type { Me, OrgSettingsView, SettingsView } from "@/types/api";
 
 export const metadata: Metadata = {
   title: "Settings",
@@ -17,10 +17,15 @@ export const metadata: Metadata = {
 };
 
 export default async function SettingsPage() {
-  let settings: SettingsView | null = null;
+  let me: Me | null = null;
+  let org: OrgSettingsView | null = null;
+  let platform: SettingsView | null = null;
   let loadError: string | null = null;
   try {
-    settings = await (await getServerApiClient()).getSettings();
+    const api = await getServerApiClient();
+    me = await api.getMe();
+    org = await api.getOrgSettings();
+    if (me.is_platform_admin) platform = await api.getPlatformSettings();
   } catch (err) {
     redirectIfUnauthenticated(err);
     loadError = err instanceof ApiError ? err.message : "Failed to load settings.";
@@ -39,22 +44,44 @@ export default async function SettingsPage() {
         </Link>
       }
     >
-      {loadError || !settings ? (
+      {loadError || !org || !me ? (
         <ErrorState message={loadError ?? "Failed to load settings."} />
       ) : (
         <>
           <Card>
-            <h2 className="mb-4 text-base font-semibold text-foreground">Twilio</h2>
-            <TwilioSettingsCard settings={settings} />
+            <h2 className="text-base font-semibold text-foreground">Twilio for {me.organization.name}</h2>
+            <p className="mb-4 text-sm text-muted-foreground">
+              The account {me.organization.name}&apos;s calls go through.
+            </p>
+            <TwilioSettingsCard settings={org.settings} usesPlatform={org.uses_platform_twilio && org.platform_twilio_available} />
           </Card>
-          <Card>
-            <h2 className="mb-4 text-base font-semibold text-foreground">Gemini</h2>
-            <GeminiSettingsCard settings={settings} />
-          </Card>
-          <Card>
-            <h2 className="mb-4 text-base font-semibold text-foreground">Public URL</h2>
-            <PublicUrlCard settings={settings} />
-          </Card>
+          {platform ? (
+            <section aria-labelledby="platform-heading" className="flex flex-col gap-4">
+              <div>
+                <h2 id="platform-heading" className="text-lg font-semibold text-foreground">
+                  Platform settings
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Shared by every company on this installation. Only platform admins see this.
+                </p>
+              </div>
+              <Card>
+                <h3 className="mb-4 text-base font-semibold text-foreground">Gemini</h3>
+                <GeminiSettingsCard settings={platform} />
+              </Card>
+              <Card>
+                <h3 className="mb-4 text-base font-semibold text-foreground">Public URL</h3>
+                <PublicUrlCard settings={platform} />
+              </Card>
+              <Card>
+                <h3 className="text-base font-semibold text-foreground">Fallback Twilio account</h3>
+                <p className="mb-4 text-sm text-muted-foreground">
+                  Used by companies that haven&apos;t connected their own Twilio account.
+                </p>
+                <TwilioSettingsCard settings={platform} scope="platform" />
+              </Card>
+            </section>
+          ) : null}
         </>
       )}
     </PageShell>

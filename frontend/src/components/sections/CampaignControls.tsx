@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 import { Button } from "@/components/ui/Button";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 import type { CampaignAction, CampaignStatus } from "@/types/api";
 
 const ACTIONS: Record<CampaignStatus, { action: CampaignAction; label: string; variant: "primary" | "secondary" | "danger" }[]> = {
@@ -43,7 +44,7 @@ export function CampaignControls({
         else router.refresh();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
-          router.push("/login");
+          endSession();
           return;
         }
         setError(err instanceof ApiError ? err.message : "Something went wrong.");

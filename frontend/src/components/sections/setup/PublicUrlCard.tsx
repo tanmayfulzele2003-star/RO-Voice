@@ -22,7 +22,7 @@ export function PublicUrlCard({ settings }: { settings: SettingsView }) {
     event.preventDefault();
     const value = String(new FormData(event.currentTarget).get("public_url") ?? "").trim();
     run(async () => {
-      await apiClient.updateSettings({ public_url: value });
+      await apiClient.updatePlatformSettings({ public_url: value });
       return test();
     });
   }

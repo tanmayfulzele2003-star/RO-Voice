@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { API_WS_BASE_URL, ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 
 /**
  * Browser (WebRTC microphone) call — the same two-way AI conversation as a
@@ -42,7 +42,6 @@ export function BrowserCall({
   customerName: string;
   profileName: string;
 }) {
-  const router = useRouter();
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [callId, setCallId] = useState<string | null>(null);
@@ -249,7 +248,7 @@ export function BrowserCall({
     } catch (err) {
       cleanup();
       if (err instanceof ApiError && err.status === 401) {
-        router.push("/login");
+        endSession();
         return;
       }
       if (err instanceof DOMException && err.name === "NotAllowedError") {

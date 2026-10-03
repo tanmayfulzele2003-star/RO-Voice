@@ -1,14 +1,13 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { CallStatusBadge } from "@/components/ui/Badge";
 import { useCallStatusPolling } from "@/hooks/useCallStatusPolling";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 
 export function StartCallButton({ customerId }: { customerId: string }) {
-  const router = useRouter();
   const [callId, setCallId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
@@ -22,7 +21,7 @@ export function StartCallButton({ customerId }: { customerId: string }) {
       setCallId(result.call_id);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        router.push("/login");
+        endSession();
         return;
       }
       setStartError(err instanceof ApiError ? err.message : "Failed to start call.");

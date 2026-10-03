@@ -4,18 +4,26 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
+import { ROLE_INFO, ROLE_RANK } from "@/lib/roles";
+import type { Me, Role } from "@/types/api";
 
-const NAV_ITEMS = [
+type NavItem = { href: string; label: string; minRole?: Role; platformOnly?: boolean };
+
+const NAV_ITEMS: NavItem[] = [
   { href: "/", label: "Overview" },
   { href: "/customers", label: "Customers" },
   { href: "/calls", label: "Calls" },
   { href: "/campaigns", label: "Campaigns" },
   { href: "/numbers", label: "Phone numbers" },
   { href: "/profiles", label: "Business profiles" },
-  { href: "/settings", label: "Settings" },
+  { href: "/team", label: "Team", minRole: "admin" },
+  { href: "/settings", label: "Settings", minRole: "admin" },
+  { href: "/platform", label: "Companies", platformOnly: true },
+  { href: "/account", label: "Account" },
 ];
 
-export function Sidebar() {
+export function Sidebar({ me }: { me: Me | null }) {
   const pathname = usePathname();
   const router = useRouter();
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -25,7 +33,7 @@ export function Sidebar() {
     try {
       await apiClient.logout();
     } finally {
-      router.push("/login");
+      endSession();
       router.refresh();
     }
   }
@@ -35,10 +43,22 @@ export function Sidebar() {
       aria-label="Main navigation"
       className="flex shrink-0 flex-col gap-1 border-border p-4 md:w-56 md:border-r"
     >
-      <p className="mb-3 px-2 text-sm font-semibold tracking-tight text-foreground">
-        AI Calling Agent
-      </p>
-      {NAV_ITEMS.map((item) => {
+      <div className="mb-3 px-2">
+        <p className="text-sm font-semibold tracking-tight text-foreground">
+          {me?.organization.name ?? "AI Calling Agent"}
+        </p>
+        {me ? (
+          <p className="text-xs text-muted-foreground">
+            {me.username} · {ROLE_INFO[me.role].label}
+            {me.is_platform_admin ? " · Platform admin" : ""}
+          </p>
+        ) : null}
+      </div>
+      {NAV_ITEMS.filter(
+        (item) =>
+          (!item.minRole || (me && ROLE_RANK[me.role] >= ROLE_RANK[item.minRole])) &&
+          (!item.platformOnly || me?.is_platform_admin),
+      ).map((item) => {
         const isActive = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
         return (
           <Link

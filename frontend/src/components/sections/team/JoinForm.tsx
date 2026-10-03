@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ApiError, apiClient } from "@/lib/apiClient";
 
-export function FirstAdminForm({ token }: { token: string }) {
+export function JoinForm({ token, firstOwner }: { token: string; firstOwner: boolean }) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -15,20 +15,15 @@ export function FirstAdminForm({ token }: { token: string }) {
     event.preventDefault();
     setError(null);
     const data = new FormData(event.currentTarget);
-    const setupToken = String(data.get("token") ?? "").trim();
-    const companyName = String(data.get("company_name") ?? "").trim();
     const username = String(data.get("username") ?? "").trim();
     const password = String(data.get("password") ?? "");
-    if (!setupToken) return setError("Paste the setup link's token from the server log.");
-    if (!companyName) return setError("Enter your company's name.");
     if (username.length < 3) return setError("Choose a username of at least 3 characters.");
     if (password.length < 8) return setError("Use a password of at least 8 characters.");
     if (password !== String(data.get("confirm") ?? "")) return setError("The passwords don't match.");
-
     startTransition(async () => {
       try {
-        await apiClient.createFirstAdmin({ token: setupToken, company_name: companyName, username, password });
-        router.push("/get-started");
+        await apiClient.acceptInvite(token, username, password);
+        router.push(firstOwner ? "/get-started" : "/");
         router.refresh();
       } catch (err) {
         setError(err instanceof ApiError ? err.message : "Unexpected error. Please try again.");
@@ -38,12 +33,6 @@ export function FirstAdminForm({ token }: { token: string }) {
 
   return (
     <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
-      <Field label="Setup token" htmlFor="token">
-        <Input id="token" name="token" defaultValue={token} autoComplete="off" />
-      </Field>
-      <Field label="Company name" htmlFor="company_name">
-        <Input id="company_name" name="company_name" placeholder="AquaPure RO Systems" autoComplete="organization" />
-      </Field>
       <Field label="Username" htmlFor="username">
         <Input id="username" name="username" autoComplete="username" />
       </Field>
@@ -59,7 +48,7 @@ export function FirstAdminForm({ token }: { token: string }) {
         </p>
       ) : null}
       <Button type="submit" disabled={isPending}>
-        {isPending ? "Creating…" : "Create admin account"}
+        {isPending ? "Creating account…" : "Create my account"}
       </Button>
     </form>
   );

@@ -5,18 +5,33 @@ import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { apiClient } from "@/lib/apiClient";
 import { formatPhone } from "@/lib/formatters";
-import type { SettingsUpdate, SettingsView, TwilioAccountNumber } from "@/types/api";
+import type { SettingValue, SettingsUpdate, TwilioAccountNumber, TwilioSettingKey } from "@/types/api";
 import { ActionNote } from "./ActionNote";
 import { SourceBadge } from "./SourceBadge";
 import { useAction } from "./useAction";
 
-export function TwilioSettingsCard({ settings }: { settings: SettingsView }) {
+/**
+ * Twilio account form. `scope="org"` edits the signed-in company's own
+ * account; `scope="platform"` the platform's fallback account (platform
+ * admin), used by companies that don't connect their own.
+ */
+export function TwilioSettingsCard({
+  settings,
+  scope = "org",
+  usesPlatform = false,
+}: {
+  settings: Record<TwilioSettingKey, SettingValue>;
+  scope?: "org" | "platform";
+  usesPlatform?: boolean;
+}) {
+  const save = scope === "org" ? apiClient.updateOrgSettings : apiClient.updatePlatformSettings;
+  const testApi = scope === "org" ? apiClient.testOrgTwilio : apiClient.testPlatformTwilio;
   const { run, isPending, message } = useAction();
   const importer = useAction();
   const [numbers, setNumbers] = useState<TwilioAccountNumber[] | null>(null);
 
   async function testConnection() {
-    const result = await apiClient.testTwilio();
+    const result = await testApi();
     setNumbers(result.ok ? (result.details?.numbers ?? []) : null);
     return { ok: result.ok, text: result.message };
   }
@@ -31,7 +46,7 @@ export function TwilioSettingsCard({ settings }: { settings: SettingsView }) {
     const token = String(data.get("twilio_auth_token") ?? "").trim();
     if (token) update.twilio_auth_token = token; // empty = keep the saved token
     run(async () => {
-      await apiClient.updateSettings(update);
+      await save(update);
       return testConnection();
     });
   }
@@ -61,6 +76,12 @@ export function TwilioSettingsCard({ settings }: { settings: SettingsView }) {
 
   return (
     <div className="flex flex-col gap-4">
+      {usesPlatform ? (
+        <p className="rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
+          Your calls currently go through the platform&apos;s Twilio account. Enter your own
+          account below to use your own numbers and billing.
+        </p>
+      ) : null}
       <form onSubmit={handleSave} noValidate className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <Field label="Account SID" htmlFor="twilio_account_sid">
           <Input

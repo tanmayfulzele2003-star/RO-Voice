@@ -22,7 +22,7 @@ export function GeminiSettingsCard({ settings }: { settings: SettingsView }) {
     event.preventDefault();
     const value = String(new FormData(event.currentTarget).get("google_api_key") ?? "").trim();
     run(async () => {
-      if (value) await apiClient.updateSettings({ google_api_key: value });
+      if (value) await apiClient.updatePlatformSettings({ google_api_key: value });
       return test();
     });
   }
