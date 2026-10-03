@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 import type { BusinessProfile, Customer } from "@/types/api";
 
 // Mirrors backend/audiocall/phone.py: strip separators, then E.164.
@@ -95,7 +96,7 @@ export function CustomerForm({ mode, customer, profiles, onSuccess }: CustomerFo
         }
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
-          router.push("/login");
+          endSession();
           return;
         }
         setFormError(err instanceof ApiError ? err.message : "Unexpected error. Please try again.");

@@ -1,0 +1,16 @@
+# HTTPS front door for `docker compose --profile https up`.
+# Caddy gets and renews a Let's Encrypt certificate for $DOMAIN automatically
+# (ports 80 and 443 must reach this machine). The dashboard and the API share
+# the one domain: backend paths go to FastAPI, everything else to Next.js.
+{$DOMAIN} {
+	encode gzip
+
+	@backend path /api/* /voice /call-status /transfer-status /transfer-whisper /stream /browser-stream /health /docs /docs/* /redoc /openapi.json
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

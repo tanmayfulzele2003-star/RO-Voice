@@ -44,6 +44,12 @@ const EVENT_LABELS: Record<string, string> = {
   agent_end_call: "Agent ended call",
   max_duration: "Time limit reached",
   analysis_failed: "AI summary failed",
+  transfer_requested: "Agent is transferring to a person",
+  transfer_started: "Transferring to a person",
+  transfer_answered: "Person took the call",
+  transfer_failed: "Transfer not answered",
+  capacity_transfer: "All lines busy — sent to a person",
+  capacity_busy: "All lines busy — caller turned away",
 };
 
 export function formatEventType(eventType: string): string {
@@ -57,6 +63,8 @@ const ERROR_EVENTS = new Set([
   "analysis_failed",
   "silence_timeout",
   "speech_not_recognized",
+  "transfer_failed",
+  "capacity_busy",
 ]);
 
 export function isErrorEvent(eventType: string): boolean {

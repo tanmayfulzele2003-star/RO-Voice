@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { PageShell } from "@/components/layout/PageShell";
 import { AutoRefresh } from "@/components/sections/AutoRefresh";
@@ -79,6 +80,30 @@ export default async function CallDetailPage({
     { label: "Business", value: call.profile_name ?? "—" },
     { label: "Error reason", value: call.error_reason ? formatStatusLabel(call.error_reason) : "—" },
   ];
+  if (call.from_number || call.to_number) {
+    info.push({
+      label: "Line",
+      value: `${call.from_number ? formatPhone(call.from_number) : "?"} → ${
+        call.to_number ? formatPhone(call.to_number) : "?"
+      }`,
+    });
+  }
+  if (call.transferred_to) {
+    info.push({ label: "Transferred to", value: formatPhone(call.transferred_to) });
+  }
+  if (call.campaign_id) {
+    info.push({
+      label: "Campaign",
+      value: (
+        <Link
+          href={`/campaigns/${call.campaign_id}`}
+          className="text-primary underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >
+          View campaign
+        </Link>
+      ),
+    });
+  }
   const context = [
     call.customer_company && `Company: ${call.customer_company}`,
     call.customer_purpose && `Purpose: ${call.customer_purpose}`,

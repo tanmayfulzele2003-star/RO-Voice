@@ -52,4 +52,31 @@ def test_agent_exposes_tools():
         "save_customer_info",
         "get_call_progress",
         "end_call",
+        "transfer_to_human",
     }
+
+
+async def test_transfer_unavailable_on_browser_or_without_number():
+    browser = _ctx(channel="browser", profile={**DEFAULT_RO_PROFILE, "transfer_number": "+919800000001"})
+    assert (await agent.transfer_to_human("asked", "summary", browser))["status"] == "unavailable"
+    no_number = _ctx(channel="phone")
+    assert (await agent.transfer_to_human("asked", "summary", no_number))["status"] == "unavailable"
+    assert "transfer" not in no_number.state
+
+
+async def test_transfer_available_on_phone_with_number():
+    ctx = _ctx(channel="phone", profile={**DEFAULT_RO_PROFILE, "transfer_number": "+919800000001"})
+    result = await agent.transfer_to_human("hot lead", "Rahul wants 500 LPH", ctx)
+    assert result["status"] == "transferring"
+    assert ctx.state["transfer"] == {"reason": "hot lead", "summary": "Rahul wants 500 LPH"}
+
+
+def test_instruction_adapts_to_inbound_calls_and_transfer():
+    outbound = agent.render_instruction(DEFAULT_RO_PROFILE, {})
+    inbound = agent.render_instruction(DEFAULT_RO_PROFILE, {}, direction="inbound")
+    assert "outbound PHONE CALL" in outbound and "called YOU" not in outbound
+    assert "inbound PHONE CALL" in inbound and "called YOU" in inbound
+
+    with_transfer = agent.render_instruction(DEFAULT_RO_PROFILE, {}, transfer_available=True)
+    assert "transfer_to_human" in with_transfer
+    assert "transfer_to_human" not in outbound  # never offered a tool it can't use

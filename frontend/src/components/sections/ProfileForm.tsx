@@ -6,6 +6,7 @@ import { z } from "zod";
 import { Button } from "@/components/ui/Button";
 import { Field, Input } from "@/components/ui/Input";
 import { ApiError, apiClient } from "@/lib/apiClient";
+import { endSession } from "@/lib/session";
 import type { BusinessProfile, ProfileField } from "@/types/api";
 
 const profileSchema = z.object({
@@ -17,6 +18,13 @@ const profileSchema = z.object({
   call_objective: z.string().trim().min(1, "Call objective is required").max(2000),
   greeting: z.string().trim().max(1000),
   language: z.string().trim().max(50),
+  transfer_number: z
+    .string()
+    .trim()
+    .transform((value) => value.replace(/[\s\-().]/g, "").replace(/^00/, "+"))
+    .refine((value) => value === "" || /^\+[1-9]\d{7,14}$/.test(value), {
+      message: "Use international format, e.g. +919876543210",
+    }),
 });
 
 type EditableField = ProfileField & { rowId: number };
@@ -87,6 +95,7 @@ export function ProfileForm({ profile }: { profile?: BusinessProfile }) {
       call_objective: result.data.call_objective,
       greeting: orNull(result.data.greeting),
       language: orNull(result.data.language),
+      transfer_number: orNull(result.data.transfer_number),
       is_default: isDefault,
       fields: filledFields.map(({ key, label, description, required }) => ({
         key: key.trim(),
@@ -107,7 +116,7 @@ export function ProfileForm({ profile }: { profile?: BusinessProfile }) {
         router.refresh();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
-          router.push("/login");
+          endSession();
           return;
         }
         setFormError(err instanceof ApiError ? err.message : "Unexpected error. Please try again.");
@@ -192,6 +201,27 @@ export function ProfileForm({ profile }: { profile?: BusinessProfile }) {
               placeholder="Leave empty for an automatic greeting"
             />
           </Field>
+        </div>
+        <div className="md:col-span-2">
+          <Field
+            label="Transfer number (optional)"
+            htmlFor="transfer_number"
+            error={errors.transfer_number}
+          >
+            <Input
+              id="transfer_number"
+              name="transfer_number"
+              type="tel"
+              defaultValue={profile?.transfer_number ?? ""}
+              placeholder="+919876543210"
+              aria-describedby="transfer_number_hint"
+            />
+          </Field>
+          <p id="transfer_number_hint" className="mt-1 text-sm text-muted-foreground">
+            A real person the agent can hand phone calls to when the caller asks for one, has a
+            question it can&apos;t answer, or is ready to buy. They hear a short summary first. Leave
+            empty and the agent offers a callback instead.
+          </p>
         </div>
       </section>
 

@@ -19,6 +19,7 @@ const OUTCOME_OPTIONS: { value: string; label: string }[] = [
   { value: "qualified", label: "Qualified lead" },
   { value: "not_interested", label: "Not interested" },
   { value: "callback", label: "Call back" },
+  { value: "transferred", label: "Transferred to a person" },
   { value: "incomplete", label: "Incomplete" },
   { value: "no_answer", label: "No answer" },
   { value: "no_conversation", label: "No conversation" },
@@ -190,6 +191,18 @@ export function CallsFilterBar({ profiles }: { profiles: { id: string; name: str
           { value: "browser", label: "Browser" },
         ]}
         allLabel="All channels"
+      />
+
+      <FilterSelect
+        id="direction"
+        label="Direction"
+        value={searchParams.get("direction") ?? ""}
+        onChange={(value) => updateParams({ direction: value })}
+        options={[
+          { value: "outbound", label: "Outbound" },
+          { value: "inbound", label: "Inbound" },
+        ]}
+        allLabel="Both directions"
       />
 
       {profiles.length > 1 ? (

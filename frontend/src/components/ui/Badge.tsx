@@ -61,6 +61,7 @@ const OUTCOME_TONE: Record<string, Tone> = {
   qualified: "success",
   not_interested: "danger",
   callback: "warning",
+  transferred: "info",
   incomplete: "neutral",
   no_answer: "warning",
   no_conversation: "neutral",
@@ -71,6 +72,7 @@ export const OUTCOME_LABEL: Record<string, string> = {
   qualified: "Qualified lead",
   not_interested: "Not interested",
   callback: "Call back",
+  transferred: "Transferred to a person",
   incomplete: "Incomplete",
   no_answer: "No answer",
   no_conversation: "No conversation",
@@ -84,4 +86,33 @@ export function OutcomeBadge({ outcome }: { outcome: string | null }) {
 
 export function ChannelBadge({ channel }: { channel: string }) {
   return <Badge tone="info">{channel === "browser" ? "Browser" : "Phone"}</Badge>;
+}
+
+const CAMPAIGN_STATUS_TONE: Record<string, Tone> = {
+  draft: "neutral",
+  running: "info",
+  paused: "warning",
+  completed: "success",
+  cancelled: "neutral",
+};
+
+export function CampaignStatusBadge({ status }: { status: string }) {
+  return (
+    <Badge tone={CAMPAIGN_STATUS_TONE[status] ?? "neutral"}>
+      {status.charAt(0).toUpperCase() + status.slice(1)}
+    </Badge>
+  );
+}
+
+const CONTACT_STATUS_TONE: Record<string, Tone> = {
+  pending: "neutral",
+  dialing: "info",
+  completed: "success",
+  failed: "danger",
+  cancelled: "neutral",
+};
+
+export function ContactStatusBadge({ status }: { status: string }) {
+  const label = status === "dialing" ? "On a call" : status.charAt(0).toUpperCase() + status.slice(1);
+  return <Badge tone={CONTACT_STATUS_TONE[status] ?? "neutral"}>{label}</Badge>;
 }

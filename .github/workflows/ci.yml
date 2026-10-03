@@ -22,6 +22,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ci
       SESSION_SECRET: ci-only-secret-not-used-anywhere-else
+      RUN_DB_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -52,3 +53,22 @@ jobs:
       - run: npm run lint
       - run: npx next typegen && npx tsc --noEmit
       - run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start the stack the way install.sh does
+        run: |
+          printf 'SESSION_SECRET=%s\nPOSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 32)" "$(openssl rand -hex 16)" > .env
+          docker compose up -d --build --wait --wait-timeout 300
+      - name: Smoke test
+        run: |
+          curl -fsS http://localhost:8000/health
+          curl -fsS http://localhost:8000/api/setup/status | grep -q '"needs_admin":true'
+          # Server-side rendering reaches the backend over the compose network.
+          curl -fsS http://localhost:3000/login | grep -q 'No admin account yet'
+          docker compose logs backend | grep -q 'Finish setup at: http://localhost:3000/setup?token='
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs

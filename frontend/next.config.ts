@@ -5,6 +5,8 @@ const API_ORIGIN = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const API_WS_ORIGIN = API_ORIGIN.replace(/^http/, "ws");
 
 const nextConfig: NextConfig = {
+  // Self-contained server bundle for the Docker image (frontend/Dockerfile).
+  output: "standalone",
   async headers() {
     return [
       {

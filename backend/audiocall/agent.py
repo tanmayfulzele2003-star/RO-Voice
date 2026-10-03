@@ -16,6 +16,13 @@ session per call and is given:
     - `get_call_progress` — re-check the checklist (e.g. after a digression).
     - `end_call` — finish the call with its own lead assessment; the bridge
       hangs up once the goodbye has finished playing.
+    - `transfer_to_human` — hand the call to a real person (the profile's
+      transfer number, phone calls only); the bridge redirects the live call
+      once the agent's "connecting you" line has played.
+
+Instructions adapt to the call's direction: on an outbound call the agent
+introduces itself and says why it's calling; on an inbound call it thanks the
+caller and asks how it can help.
 """
 
 import contextlib
@@ -75,12 +82,40 @@ _llm = GeminiNoThinking(
 
 
 
+# Lazily built (cached) genai clients on the model. They read GOOGLE_API_KEY
+# when first used, so dropping them makes the next call use a new key.
+_CLIENT_CACHE_ATTRS = ("api_client", "_api_backend", "_live_api_version", "_live_api_client")
+
+
+def reset_model_clients() -> None:
+    """Point future Gemini calls at the current GOOGLE_API_KEY (a key saved
+    in the dashboard). Live sessions already running keep their client."""
+    for attr in _CLIENT_CACHE_ATTRS:
+        _llm.__dict__.pop(attr, None)
+
+
 # ── Instructions (built per call from session state) ──────────────────────────
 def build_instruction(ctx: ReadonlyContext) -> str:
-    return render_instruction(ctx.state.get("profile"), ctx.state.get("customer"))
+    return render_instruction(
+        ctx.state.get("profile"),
+        ctx.state.get("customer"),
+        direction=ctx.state.get("direction") or "outbound",
+        transfer_available=transfer_available(ctx.state),
+    )
 
 
-def render_instruction(profile: dict | None, customer: dict | None) -> str:
+def transfer_available(state) -> bool:  # noqa: ANN001 — dict or ADK State
+    """A person can take over: phone channel and a transfer number set."""
+    profile = state.get("profile") or {}
+    return state.get("channel") == "phone" and bool(profile.get("transfer_number"))
+
+
+def render_instruction(
+    profile: dict | None,
+    customer: dict | None,
+    direction: str = "outbound",
+    transfer_available: bool = False,
+) -> str:
     profile = profile or DEFAULT_RO_PROFILE
     customer = customer or {}
     fields = profile.get("fields") or DEFAULT_RO_PROFILE["fields"]
@@ -105,7 +140,14 @@ def render_instruction(profile: dict | None, customer: dict | None) -> str:
     ]
     known_block = "\n".join(k for k in known if k) or "- Nothing yet."
 
-    if profile.get("greeting"):
+    inbound = direction == "inbound"
+    if inbound:
+        greeting = (
+            f"The customer called YOU. Thank them for calling {business}, introduce yourself as "
+            f"{agent_name}, and ask how you can help. Work out why they're calling before "
+            "steering towards the checklist."
+        )
+    elif profile.get("greeting"):
         greeting = f'Open with this greeting (adapt naturally, keep the meaning): "{profile["greeting"]}"'
     else:
         greeting = (
@@ -125,8 +167,22 @@ def render_instruction(profile: dict | None, customer: dict | None) -> str:
         )
 
     objective = profile["call_objective"]
+    call_kind = "an inbound PHONE CALL (the customer called you)" if inbound else "a live outbound PHONE CALL"
+    if transfer_available:
+        transfer_rule = """
+12. A real person from the team is available. Call `transfer_to_human` when the customer asks
+    for a human, has a question you can't answer (pricing, a complaint, an existing order),
+    or is clearly a hot lead ready to buy now. Pass a one-sentence summary for the person
+    (who they are, what they want, what you've collected). After the tool returns, say ONE
+    short line like "I'll connect you to my colleague now, please stay on the line" and say
+    nothing else — don't call end_call."""
+    else:
+        transfer_rule = """
+12. No human can take this call right now. If the customer asks for a person, say the team
+    will call them back, make sure you have their name and best time to call, and finish
+    with end_call (follow_up_required: true)."""
     return f"""You are {agent_name}, a friendly, professional representative of {business}, \
-on a live outbound PHONE CALL with a customer. You talk; there is no human operator.
+on {call_kind} with a customer. You talk; there is no human operator on the line.
 
 {about}
 
@@ -163,7 +219,7 @@ How to work (follow strictly):
     lead_status (interested / not_interested / uncertain) and whether a follow-up is needed.
     Say your goodbye in the same turn; the line closes once you finish speaking.
 11. Messages in square brackets like [SYSTEM: ...] are notes from the call system, not the
-    customer. Follow them, never read them aloud.
+    customer. Follow them, never read them aloud.{transfer_rule}
 """
 
 
@@ -269,13 +325,50 @@ async def end_call(
     return {"status": "ending", "note": "The line will close after you finish speaking."}
 
 
+async def transfer_to_human(reason: str, summary: str, tool_context: ToolContext) -> dict[str, Any]:
+    """Hands the phone call over to a real person from the team.
+
+    Use when the customer asks for a human, needs something you can't answer,
+    or is ready to buy now.
+
+    Args:
+        reason: Why you're transferring, e.g. "customer asked for a human",
+            "pricing question", "hot lead".
+        summary: One sentence for the person taking over: who the customer is,
+            what they want, and the key facts you've collected.
+
+    Returns:
+        Whether the transfer will happen. If it will, say one short "connecting
+        you now" line and nothing else.
+    """
+    if not transfer_available(tool_context.state):
+        return {
+            "status": "unavailable",
+            "note": "No one can take a transferred call. Offer a callback from the team instead, "
+            "then finish with end_call (follow_up_required: true).",
+        }
+    tool_context.state["transfer"] = {"reason": reason, "summary": summary}
+    call_id = _call_id(tool_context)
+    if call_id is not None:
+        from audiocall.services import events_service
+
+        # The summary is read back for the whisper the person hears on pickup.
+        await events_service.record(call_id, "transfer_requested", summary.strip() or reason)
+    return {
+        "status": "transferring",
+        "note": "Say one short line telling the customer you're connecting them now. "
+        "The call is handed over as soon as you finish speaking.",
+    }
+
+
 root_agent = Agent(
     name="calling_agent",
     model=_llm,
     description=(
-        "An autonomous outbound voice agent that qualifies leads for a configurable business, "
-        "collecting a checklist of requirements and making its own lead assessment."
+        "An autonomous voice agent (outbound and inbound) that qualifies leads for a configurable "
+        "business, collecting a checklist of requirements, making its own lead assessment and "
+        "handing the call to a person when needed."
     ),
     instruction=build_instruction,
-    tools=[save_customer_info, get_call_progress, end_call],
+    tools=[save_customer_info, get_call_progress, end_call, transfer_to_human],
 )

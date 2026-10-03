@@ -3,17 +3,52 @@ import type {
   BusinessProfile,
   BusinessProfileInput,
   CallDetail,
+  CampaignAction,
+  Campaign,
+  CampaignCreateInput,
+  CampaignDetail,
   CallListItem,
   CallStartResponse,
   Customer,
   CustomerCreateInput,
   CustomerUpdateInput,
+  Invite,
+  InviteCreated,
+  JoinInfo,
   LoginResponse,
+  Me,
+  OrgSettingsView,
+  Organization,
+  PlatformOrganization,
+  PlatformOrganizationCreated,
+  Role,
+  TeamUser,
   Paginated,
+  PhoneNumber,
+  PhoneNumberInput,
+  ProfileTemplate,
+  SettingsUpdate,
+  SettingsView,
+  SetupChecklist,
+  SetupStatus,
   StatsOverview,
+  TestResult,
 } from "@/types/api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+/**
+ * Where Server Components reach the backend. Defaults to the public URL; in
+ * Docker the frontend container sets API_INTERNAL_URL=http://backend:8000,
+ * since "localhost" there is the frontend container itself. Read at request
+ * time on the server only (it's not a NEXT_PUBLIC_ variable, so it never
+ * reaches the browser bundle).
+ */
+function baseUrl(): string {
+  if (typeof window === "undefined" && process.env.API_INTERNAL_URL) {
+    return process.env.API_INTERNAL_URL;
+  }
+  return API_BASE_URL;
+}
 /** WebSocket origin of the same backend (http→ws, https→wss), no trailing slash. */
 export const API_WS_BASE_URL = API_BASE_URL.replace(/^http/, "ws").replace(/\/+$/, "");
 
@@ -38,7 +73,7 @@ async function request<T>(
   options: RequestOptions,
   cookieHeader?: string,
 ): Promise<T> {
-  const url = new URL(path, API_BASE_URL);
+  const url = new URL(path, baseUrl());
   if (options.searchParams) {
     for (const [key, value] of Object.entries(options.searchParams)) {
       if (value !== undefined) url.searchParams.set(key, String(value));
@@ -109,6 +144,8 @@ export interface CallListFilters {
   outcome?: string;
   channel?: string;
   profile_id?: string;
+  direction?: string;
+  campaign_id?: string;
   [key: string]: string | number | undefined;
 }
 
@@ -126,6 +163,58 @@ export function makeApiClient(cookieHeader?: string) {
         cookieHeader,
       ),
     logout: () => request<void>("/api/auth/logout", { method: "POST" }, cookieHeader),
+    getMe: () => request<Me>("/api/auth/me", {}, cookieHeader),
+    changePassword: (currentPassword: string, newPassword: string) =>
+      request<void>(
+        "/api/auth/password",
+        { method: "POST", body: { current_password: currentPassword, new_password: newPassword } },
+        cookieHeader,
+      ),
+
+    getOrganization: () => request<Organization>("/api/organization", {}, cookieHeader),
+    renameOrganization: (name: string) =>
+      request<Organization>("/api/organization", { method: "PATCH", body: { name } }, cookieHeader),
+    listUsers: () => request<TeamUser[]>("/api/users", {}, cookieHeader),
+    updateUser: (id: string, input: { role?: Role; is_active?: boolean }) =>
+      request<TeamUser>(`/api/users/${id}`, { method: "PATCH", body: input }, cookieHeader),
+    deleteUser: (id: string) => request<void>(`/api/users/${id}`, { method: "DELETE" }, cookieHeader),
+    listInvites: () => request<Invite[]>("/api/invites", {}, cookieHeader),
+    createInvite: (role: Role, note: string | null) =>
+      request<InviteCreated>("/api/invites", { method: "POST", body: { role, note } }, cookieHeader),
+    revokeInvite: (id: string) =>
+      request<void>(`/api/invites/${id}`, { method: "DELETE" }, cookieHeader),
+    describeInvite: (token: string) =>
+      request<JoinInfo>(`/api/join/${encodeURIComponent(token)}`, {}, cookieHeader),
+    acceptInvite: (token: string, username: string, password: string) =>
+      request<Me>(
+        `/api/join/${encodeURIComponent(token)}`,
+        { method: "POST", body: { username, password } },
+        cookieHeader,
+      ),
+
+    listPlatformOrganizations: () =>
+      request<PlatformOrganization[]>("/api/platform/organizations", {}, cookieHeader),
+    createPlatformOrganization: (name: string, maxConcurrentCalls: number | null) =>
+      request<PlatformOrganizationCreated>(
+        "/api/platform/organizations",
+        { method: "POST", body: { name, max_concurrent_calls: maxConcurrentCalls } },
+        cookieHeader,
+      ),
+    updatePlatformOrganization: (
+      id: string,
+      input: { name?: string; is_active?: boolean; max_concurrent_calls?: number | null },
+    ) =>
+      request<PlatformOrganization>(
+        `/api/platform/organizations/${id}`,
+        { method: "PATCH", body: input },
+        cookieHeader,
+      ),
+    createOwnerInvite: (orgId: string) =>
+      request<InviteCreated>(
+        `/api/platform/organizations/${orgId}/invites`,
+        { method: "POST" },
+        cookieHeader,
+      ),
 
     listCustomers: (params: { limit?: number; offset?: number } = {}) =>
       request<Paginated<Customer>>("/api/customers", { searchParams: params }, cookieHeader),
@@ -164,6 +253,59 @@ export function makeApiClient(cookieHeader?: string) {
     listCalls: (params: CallListFilters = {}) =>
       request<Paginated<CallListItem>>("/api/calls", { searchParams: params }, cookieHeader),
     getCall: (id: string) => request<CallDetail>(`/api/calls/${id}`, {}, cookieHeader),
+
+    listNumbers: () => request<PhoneNumber[]>("/api/numbers", {}, cookieHeader),
+    createNumber: (input: PhoneNumberInput) =>
+      request<PhoneNumber>("/api/numbers", { method: "POST", body: input }, cookieHeader),
+    updateNumber: (id: string, input: Partial<PhoneNumberInput>) =>
+      request<PhoneNumber>(`/api/numbers/${id}`, { method: "PATCH", body: input }, cookieHeader),
+    deleteNumber: (id: string) =>
+      request<void>(`/api/numbers/${id}`, { method: "DELETE" }, cookieHeader),
+    syncNumberToTwilio: (id: string) =>
+      request<PhoneNumber>(`/api/numbers/${id}/sync-twilio`, { method: "POST" }, cookieHeader),
+
+    listCampaigns: () => request<Campaign[]>("/api/campaigns", {}, cookieHeader),
+    getCampaign: (id: string) =>
+      request<CampaignDetail>(`/api/campaigns/${id}`, {}, cookieHeader),
+    createCampaign: (input: CampaignCreateInput) =>
+      request<CampaignDetail>("/api/campaigns", { method: "POST", body: input }, cookieHeader),
+    changeCampaignStatus: (id: string, action: CampaignAction) =>
+      request<CampaignDetail>(`/api/campaigns/${id}/${action}`, { method: "POST" }, cookieHeader),
+    deleteCampaign: (id: string) =>
+      request<void>(`/api/campaigns/${id}`, { method: "DELETE" }, cookieHeader),
+
+    getSetupStatus: () => request<SetupStatus>("/api/setup/status", {}, cookieHeader),
+    createFirstAdmin: (input: {
+      token: string;
+      company_name: string;
+      username: string;
+      password: string;
+    }) =>
+      request<SetupStatus>("/api/setup/admin", { method: "POST", body: input }, cookieHeader),
+    getSetupChecklist: () => request<SetupChecklist>("/api/setup/checklist", {}, cookieHeader),
+    setSetupFlag: (key: "setup_profile" | "setup_completed", value: boolean) =>
+      request<void>("/api/setup/flags", { method: "POST", body: { key, value } }, cookieHeader),
+
+    /** The company's own Twilio account (admins and owners). */
+    getOrgSettings: () => request<OrgSettingsView>("/api/settings", {}, cookieHeader),
+    updateOrgSettings: (input: SettingsUpdate) =>
+      request<OrgSettingsView>("/api/settings", { method: "PATCH", body: input }, cookieHeader),
+    testOrgTwilio: () =>
+      request<TestResult>("/api/settings/test-twilio", { method: "POST" }, cookieHeader),
+
+    /** Platform-wide settings (platform admin only). */
+    getPlatformSettings: () => request<SettingsView>("/api/platform/settings", {}, cookieHeader),
+    updatePlatformSettings: (input: SettingsUpdate) =>
+      request<SettingsView>("/api/platform/settings", { method: "PATCH", body: input }, cookieHeader),
+    testPlatformTwilio: () =>
+      request<TestResult>("/api/platform/settings/test-twilio", { method: "POST" }, cookieHeader),
+    testGemini: () =>
+      request<TestResult>("/api/platform/settings/test-gemini", { method: "POST" }, cookieHeader),
+    testPublicUrl: () =>
+      request<TestResult>("/api/platform/settings/test-public-url", { method: "POST" }, cookieHeader),
+
+    listProfileTemplates: () =>
+      request<ProfileTemplate[]>("/api/profiles/templates", {}, cookieHeader),
 
     getStatsOverview: () =>
       request<StatsOverview>("/api/stats/overview", {}, cookieHeader),

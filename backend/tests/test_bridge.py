@@ -58,6 +58,7 @@ class FakeTransport:
         self.cleared = 0
         self.hung_up = False
         self.aborted = None
+        self.transferred = None
         for _ in range(5):
             self.inbound.put_nowait(Inbound("audio", audio=SILENT_AUDIO))
         if customer_hangs_up_after is not None:
@@ -95,6 +96,10 @@ class FakeTransport:
     async def abort(self, message="sorry"):
         self.aborted = message
 
+    async def transfer(self, twiml):
+        self.transferred = twiml
+        return True
+
 
 class FakeRunner:
     def __init__(self, script, fail_with=None):
@@ -122,8 +127,9 @@ def record(monkeypatch):
     async def mark_stream_started(call_id, ts):
         log["started"] = True
 
-    async def mark_stream_ended(call_id, ts, status_override=None, error_reason=None):
+    async def mark_stream_ended(call_id, ts, status_override=None, error_reason=None, transferred_to=None):
         log["ended"] = {"status_override": status_override, "error_reason": error_reason}
+        log["transferred_to"] = transferred_to
 
     async def record_agent_assessment(call_id, lead_status, follow_up):
         log["outcome"] = (lead_status, follow_up)
@@ -299,3 +305,115 @@ async def test_twilio_transport_skips_rest_hangup_when_customer_hung_up(monkeypa
     t.remote_ended = False
     await t.hang_up()
     assert called == ["CA1"]
+
+
+async def test_inbound_call_agent_answers_instead_of_pitching(monkeypatch, record):
+    async def load_call_context(call_id):
+        return {"direction": "inbound", "customer": {}, "profile": {"name": "AquaPure", "fields": []}}
+
+    monkeypatch.setattr(bridge_mod.calls_service, "load_call_context", load_call_context)
+    runner = FakeRunner([said("Thanks for calling AquaPure, how can I help?")])
+    await run_call(monkeypatch, runner, FakeTransport(customer_hangs_up_after=0.2))
+
+    first = runner.queue._queue.get_nowait()
+    assert "called in" in first.content.parts[0].text
+    assert "Start the conversation now" not in first.content.parts[0].text
+
+
+def _phone_transport(**kw):
+    t = FakeTransport(**kw)
+    t.channel = "phone"
+    return t
+
+
+def _transfer_context(transfer_number="+919800000001"):
+    async def load_call_context(call_id):
+        return {
+            "direction": "outbound",
+            "from_number": "+14155550100",
+            "to_number": "+919876543210",
+            "customer": {"name": "Rahul Kumar"},
+            "profile": {"name": "AquaPure", "fields": [], "transfer_number": transfer_number},
+        }
+
+    return load_call_context
+
+
+TRANSFER = SimpleNamespace(
+    name="transfer_to_human",
+    args={"reason": "customer asked for a human", "summary": "Rahul wants a 500 LPH quote"},
+)
+
+
+async def test_transfer_redirects_call_after_connecting_line_is_played(monkeypatch, record):
+    monkeypatch.setattr(bridge_mod.calls_service, "load_call_context", _transfer_context())
+    runner = FakeRunner(
+        [
+            said("Can I speak to a person?", who="customer"),
+            ev(calls=[TRANSFER]),
+            said("Sure, connecting you to my colleague now."),
+            audio(),
+            ev(turn_complete=True),
+        ]
+    )
+    transport = _phone_transport()
+    await run_call(monkeypatch, runner, transport)
+
+    # Redirected only after the "connecting you" audio was played (mark echoed).
+    assert transport.marks == ["hangup"]
+    twiml = transport.transferred
+    assert "<Number" in twiml and "+919800000001</Number>" in twiml
+    assert 'callerId="+14155550100"' in twiml  # our outbound number, not the customer's
+    assert "/transfer-status?call_id=" in twiml and "/transfer-whisper?call_id=" in twiml
+    assert record["transferred_to"] == "+919800000001"
+    assert record["ended"]["error_reason"] is None
+    assert "transfer_started" in record["events"]
+
+
+async def test_transfer_is_ignored_without_a_transfer_number(monkeypatch, record):
+    monkeypatch.setattr(bridge_mod.calls_service, "load_call_context", _transfer_context(None))
+    runner = FakeRunner([said("Hi!"), ev(calls=[TRANSFER])])
+    transport = _phone_transport(customer_hangs_up_after=0.3)
+    await run_call(monkeypatch, runner, transport)
+
+    assert transport.transferred is None
+    assert record["transferred_to"] is None
+
+
+async def test_no_transfer_when_customer_already_hung_up(monkeypatch, record):
+    monkeypatch.setattr(bridge_mod.calls_service, "load_call_context", _transfer_context())
+    monkeypatch.setattr(bridge_mod, "END_CALL_FALLBACK_SECONDS", 5)
+    runner = FakeRunner([said("Connecting you now."), ev(calls=[TRANSFER])])
+    transport = _phone_transport(customer_hangs_up_after=0.3)
+    await run_call(monkeypatch, runner, transport)
+
+    assert transport.transferred is None
+    assert record["transferred_to"] is None
+
+
+async def test_twilio_transport_transfer_redirects_and_skips_rest_hangup(monkeypatch):
+    from audiocall.services import calls_service
+    from audiocall.voice import transports
+
+    redirected, hung_up = [], []
+
+    async def fake_redirect(sid, twiml):
+        redirected.append((sid, twiml))
+        return True
+
+    async def fake_hang_up(sid, apology=None):
+        hung_up.append(sid)
+
+    monkeypatch.setattr(calls_service, "redirect_phone_call", fake_redirect)
+    monkeypatch.setattr(calls_service, "hang_up_phone_call", fake_hang_up)
+
+    class WS:
+        async def close(self):
+            pass
+
+    t = transports.TwilioTransport(WS())
+    t.twilio_call_sid = "CA1"
+    assert await t.transfer("<Response/>")
+    await t.hang_up()
+    assert redirected == [("CA1", "<Response/>")]
+    assert hung_up == []  # a REST hang-up would cut off the transferred call

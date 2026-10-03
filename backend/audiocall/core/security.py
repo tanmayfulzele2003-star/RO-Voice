@@ -18,6 +18,7 @@ package directly instead.
 from __future__ import annotations
 
 import base64
+import os
 import hmac
 import time
 from hashlib import sha256
@@ -78,14 +79,17 @@ def verify_session_token(token: str) -> str | None:
     return username
 
 
-def verify_twilio_signature(url: str, params: dict[str, str], signature: str) -> bool:
+def verify_twilio_signature(url: str, params: dict[str, str], signature: str, auth_token: str) -> bool:
     """Validates Twilio's `X-Twilio-Signature` header for a webhook request.
 
     `url` must be the exact public URL Twilio requested (scheme + host from
     our own config, not necessarily what the app server sees behind a proxy)
-    including its query string; `params` is the POST form body.
+    including its query string; `params` is the POST form body; `auth_token`
+    is the token of the Twilio account the call belongs to.
     """
-    validator = RequestValidator(config.TWILIO_AUTH_TOKEN)
+    if not auth_token:
+        return False
+    validator = RequestValidator(auth_token)
     return validator.validate(url, params, signature)
 
 
@@ -117,3 +121,22 @@ def verify_stream_token(token: str, call_id: object) -> bool:
         and hmac.compare_digest(signature, _sign(payload))
         and time.time() <= expiry
     )
+
+
+# ── First-run setup ─────────────────────────────────────────────────────────
+# Until the first admin exists, the dashboard's /setup page can create one if
+# it presents this token. It's derived from SESSION_SECRET, so every server
+# process agrees on it without storing anything, and it's printed in the
+# server log at startup (or set explicitly with SETUP_TOKEN). It stops working
+# as soon as an admin exists.
+def setup_token() -> str:
+    explicit = os.environ.get("SETUP_TOKEN")
+    if explicit:
+        return explicit
+    return _sign("first-admin-setup")[:24]
+
+
+def deployment_id() -> str:
+    """A non-secret fingerprint of this deployment, returned by /health so the
+    public-URL check can tell it reached this server and not something else."""
+    return _sign("deployment-id")[:12]

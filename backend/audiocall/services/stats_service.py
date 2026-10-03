@@ -7,13 +7,15 @@ round-trips, and not pulled into Python and summed) — one LEFT JOIN between
 
 from __future__ import annotations
 
+import uuid
+
 from sqlalchemy import case, func, select
 
 from audiocall.db.models import Call, CallSummary
 from audiocall.db.session import get_session_factory
 
 
-async def get_overview() -> dict:
+async def get_overview(org_id: uuid.UUID) -> dict:
     query = (
         select(
             func.count(Call.id).label("total_calls"),
@@ -29,6 +31,7 @@ async def get_overview() -> dict:
         )
         .select_from(Call)
         .outerjoin(CallSummary, CallSummary.call_id == Call.id)
+        .where(Call.org_id == org_id)
     )
 
     async with get_session_factory()() as session:

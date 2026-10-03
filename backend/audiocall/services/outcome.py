@@ -5,7 +5,9 @@ Outcome says what it *achieved*:
 
     qualified        conversation finished and the lead is interested
     not_interested   customer declined
-    callback         lead is uncertain / asked to be contacted later
+    callback         lead is uncertain / asked to be contacted later (or a
+                     transfer to a person wasn't answered)
+    transferred      the agent handed the call to a real person
     incomplete       conversation started but ended before analysis could judge it
     no_answer        never picked up / busy
     no_conversation  answered, but the customer never said anything
@@ -18,6 +20,7 @@ OUTCOMES = (
     "qualified",
     "not_interested",
     "callback",
+    "transferred",
     "incomplete",
     "no_answer",
     "no_conversation",
