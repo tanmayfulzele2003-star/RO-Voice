@@ -7,7 +7,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from audiocall.api.auth import require_admin
+from audiocall.api.auth import require_role, require_user
 from audiocall.api.schemas import (
     BrowserCallStartResponse,
     CallDetailOut,
@@ -24,15 +24,15 @@ from audiocall.api.schemas import (
 from audiocall.core.config import (
     CALL_RATE_LIMIT_MAX,
     CALL_RATE_LIMIT_WINDOW_SECONDS,
-    MAX_CONCURRENT_CALLS,
 )
 from audiocall.core import config
 from audiocall.core.rate_limit import check_rate_limit
 from audiocall.core.security import create_stream_token
 from audiocall.services import calls_service
 from audiocall.services.outcome import OUTCOMES
+from audiocall.services.team_service import UserContext
 
-router = APIRouter(prefix="/api/calls", tags=["calls"], dependencies=[Depends(require_admin)])
+router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 
 def _enforce_rate_limit(admin_username: str) -> None:
@@ -47,18 +47,18 @@ def _enforce_rate_limit(admin_username: str) -> None:
 
 @router.post("", response_model=CallStartResponse, status_code=201)
 async def start_call(
-    payload: CallStartRequest, admin_username: str = Depends(require_admin)
+    payload: CallStartRequest, user: UserContext = Depends(require_role("member"))
 ) -> CallStartResponse:
-    """Place a real outbound phone call through Twilio."""
-    _enforce_rate_limit(admin_username)
-    if await calls_service.count_active_phone_calls() >= MAX_CONCURRENT_CALLS:
+    """Place a real outbound phone call through the company's Twilio account."""
+    _enforce_rate_limit(user.username)
+    if await calls_service.free_lines(user.org_id) <= 0:
         raise HTTPException(
             status_code=429,
-            detail=f"All {MAX_CONCURRENT_CALLS} call lines are busy — try again when a call ends.",
+            detail="All call lines are busy — try again when a call ends.",
         )
 
     try:
-        call = await calls_service.start_outbound_call(payload.customer_id)
+        call = await calls_service.start_outbound_call(payload.customer_id, org_id=user.org_id)
     except calls_service.CustomerNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except calls_service.TwilioCallFailed as exc:
@@ -71,13 +71,13 @@ async def start_call(
 
 @router.post("/browser", response_model=BrowserCallStartResponse, status_code=201)
 async def start_browser_call(
-    payload: CallStartRequest, admin_username: str = Depends(require_admin)
+    payload: CallStartRequest, user: UserContext = Depends(require_role("member"))
 ) -> BrowserCallStartResponse:
     """Start a browser (WebRTC microphone) call — the same AI conversation
     without a telephony provider. Open `stream_url` within 2 minutes."""
-    _enforce_rate_limit(admin_username)
+    _enforce_rate_limit(user.username)
     try:
-        call = await calls_service.start_browser_call(payload.customer_id)
+        call = await calls_service.start_browser_call(payload.customer_id, user.org_id)
     except calls_service.CustomerNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     token = create_stream_token(call.id)
@@ -103,8 +103,10 @@ async def list_calls(
     profile_id: uuid.UUID | None = Query(default=None),
     direction: str | None = Query(default=None, description="outbound | inbound"),
     campaign_id: uuid.UUID | None = Query(default=None),
+    user: UserContext = Depends(require_user),
 ) -> Paginated[CallListItem]:
     rows, total = await calls_service.list_calls(
+        user.org_id,
         limit=limit,
         offset=offset,
         status=status,
@@ -119,7 +121,7 @@ async def list_calls(
         direction=direction,
         campaign_id=campaign_id,
     )
-    profile_names = await calls_service.profile_names()
+    profile_names = await calls_service.profile_names(user.org_id)
     items = [
         CallListItem(
             id=call.id,
@@ -149,8 +151,10 @@ async def list_calls(
 
 
 @router.get("/{call_id}", response_model=CallDetailOut)
-async def get_call_detail(call_id: uuid.UUID) -> CallDetailOut:
-    detail = await calls_service.get_call_detail(call_id)
+async def get_call_detail(
+    call_id: uuid.UUID, user: UserContext = Depends(require_user)
+) -> CallDetailOut:
+    detail = await calls_service.get_call_detail(call_id, user.org_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="Call not found")
 

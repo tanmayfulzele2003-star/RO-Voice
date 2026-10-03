@@ -29,13 +29,38 @@ class Base(DeclarativeBase):
     pass
 
 
+ROLES = ("viewer", "member", "admin", "owner")
+
+
+class Organization(Base):
+    """A company using the platform. Everything a business works with —
+    profiles, customers, calls, numbers, campaigns, users — belongs to exactly
+    one organization, and every dashboard query is filtered by it."""
+
+    __tablename__ = "organizations"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    # Phone calls this company may run at once (plan limit). NULL = only the
+    # server-wide MAX_CONCURRENT_CALLS applies.
+    max_concurrent_calls: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class BusinessProfile(Base):
     __tablename__ = "business_profiles"
     __table_args__ = (
-        # At most one default profile.
+        # At most one default profile per organization.
         Index(
             "uq_business_profiles_one_default",
-            "is_default",
+            "org_id",
             unique=True,
             postgresql_where=text("is_default"),
         ),
@@ -43,6 +68,9 @@ class BusinessProfile(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)  # business name
     agent_name: Mapped[str] = mapped_column(Text, nullable=False)
@@ -70,6 +98,9 @@ class Customer(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     phone: Mapped[str] = mapped_column(Text, nullable=False)  # E.164
     company: Mapped[str | None] = mapped_column(Text)
@@ -95,6 +126,9 @@ class PhoneNumber(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     number: Mapped[str] = mapped_column(Text, nullable=False, unique=True)  # E.164
     label: Mapped[str | None] = mapped_column(Text)
@@ -127,6 +161,9 @@ class Campaign(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     # NULL = each customer's own profile.
@@ -193,6 +230,9 @@ class Call(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     customer_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("customers.id"), nullable=False, index=True
@@ -337,12 +377,14 @@ class CallSummary(Base):
 
 
 class AppSetting(Base):
-    """A setting saved from the dashboard (Twilio credentials, Gemini key,
-    public URL). Overrides the environment; secrets are stored encrypted.
-    See services/settings_service.py."""
+    """A setting saved from the dashboard. `scope` is "platform" (Gemini key,
+    public URL, fallback Twilio account) or an organization id (that company's
+    own Twilio account, setup progress). Overrides the environment; secrets
+    are stored encrypted. See services/settings_service.py."""
 
     __tablename__ = "app_settings"
 
+    scope: Mapped[str] = mapped_column(Text, primary_key=True, default="platform")
     key: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
@@ -359,6 +401,45 @@ class AdminUser(Base):
     )
     username: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="owner")  # see ROLES
+    # Runs the platform itself: creates companies, sets the Gemini key and
+    # public URL. Independent of the role inside their own company.
+    is_platform_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    organization: Mapped["Organization"] = relationship()
+
+
+class Invite(Base):
+    """A single-use link to join an organization with a role. Only a hash of
+    the token is stored; the link itself is shown once, when created."""
+
+    __tablename__ = "invites"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    org_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    note: Mapped[str | None] = mapped_column(Text)  # who it's for, e.g. an email
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL")
+    )
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+    accepted_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )

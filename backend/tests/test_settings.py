@@ -9,7 +9,7 @@ import uuid
 
 import httpx
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import text
 
 from audiocall.api.schemas import ProfileCreate
 from audiocall.core import config, secrets_box
@@ -116,16 +116,21 @@ async def db(restore_config):
     db_session.get_engine.cache_clear()
     async with db_session.get_engine().begin() as conn:
         admins = (await conn.execute(text("SELECT count(*) FROM admin_users"))).scalar()
-        saved = (await conn.execute(text("SELECT key, value, is_secret FROM app_settings"))).all()
+        saved = (
+            await conn.execute(text("SELECT scope, key, value, is_secret FROM app_settings WHERE scope = 'platform'"))
+        ).all()
+        org_names = (await conn.execute(text("SELECT id, name FROM organizations"))).all()
     yield admins
     async with db_session.get_engine().begin() as conn:
-        await conn.execute(text("DELETE FROM app_settings"))
+        await conn.execute(text("DELETE FROM app_settings WHERE scope = 'platform'"))
         for row in saved:
             await conn.execute(
-                text("INSERT INTO app_settings (key, value, is_secret) VALUES (:k, :v, :s)"),
-                {"k": row.key, "v": row.value, "s": row.is_secret},
+                text("INSERT INTO app_settings (scope, key, value, is_secret) VALUES (:sc, :k, :v, :s)"),
+                {"sc": row.scope, "k": row.key, "v": row.value, "s": row.is_secret},
             )
         await conn.execute(text("DELETE FROM admin_users WHERE username LIKE 'setup-test-%'"))
+        for org in org_names:  # first-run setup renames the existing company
+            await conn.execute(text("UPDATE organizations SET name = :n WHERE id = :i"), {"n": org.name, "i": org.id})
     await db_session.get_engine().dispose()
 
 
@@ -145,14 +150,39 @@ async def test_saved_secret_is_encrypted_at_rest_and_clearing_falls_back(db, mon
     assert config.TWILIO_AUTH_TOKEN == "dashboard-token"
     assert settings_service.public_view()["twilio_auth_token"]["source"] == "dashboard"
     async with get_session_factory()() as session:
-        row = await session.get(AppSetting, "twilio_auth_token")
+        row = await session.get(AppSetting, ("platform", "twilio_auth_token"))
         assert row.is_secret and "dashboard-token" not in row.value
 
     await settings_service.save({"twilio_auth_token": ""})
     assert config.TWILIO_AUTH_TOKEN == "env-token"
     assert settings_service.public_view()["twilio_auth_token"]["source"] == "environment"
     async with get_session_factory()() as session:
-        assert await session.get(AppSetting, "twilio_auth_token") is None
+        assert await session.get(AppSetting, ("platform", "twilio_auth_token")) is None
+
+
+@needs_db
+async def test_company_twilio_account_overrides_platform_fallback(db):
+    from tests.dbhelpers import delete_orgs, make_org
+
+    org = await make_org()
+    try:
+        account = await settings_service.twilio_for(org.id)
+        assert account.own is False and account.client is config.twilio_client  # platform fallback
+
+        await settings_service.save_org(
+            org.id,
+            {"twilio_account_sid": "AC" + "a" * 32, "twilio_auth_token": "company-token", "twilio_phone_number": "+14155550111"},
+        )
+        account = await settings_service.twilio_for(org.id)
+        assert account.own and account.auth_token == "company-token"
+        assert account.client.username == "AC" + "a" * 32
+        assert account.phone_number == "+14155550111"
+        view = await settings_service.org_view(org.id)
+        assert view["uses_platform_twilio"] is False
+        assert view["settings"]["twilio_auth_token"]["value"] == "••••••••oken"
+        assert config.TWILIO_AUTH_TOKEN != "company-token"  # the platform's is untouched
+    finally:
+        await delete_orgs([org.id])
 
 
 @needs_db
@@ -175,15 +205,18 @@ async def test_first_admin_needs_the_token_and_works_once(db):
         pytest.skip("database already has admins")
     async with await _client() as client:
         assert (await client.get("/api/setup/status")).json() == {"needs_admin": True}
-        body = {"username": "setup-test-a", "password": "long-enough-pw"}
+        body = {"username": "setup-test-a", "password": "long-enough-pw", "company_name": "Acme Water"}
         assert (await client.post("/api/setup/admin", json={**body, "token": "wrong"})).status_code == 403
 
         res = await client.post("/api/setup/admin", json={**body, "token": setup_token()})
         assert res.status_code == 201 and "audiocall_session" in res.cookies
-        assert (await client.get("/api/auth/me")).json() == {"username": "setup-test-a"}  # logged in
+        me = (await client.get("/api/auth/me")).json()  # logged in
+        assert me["username"] == "setup-test-a" and me["role"] == "owner" and me["is_platform_admin"]
+        assert me["organization"]["name"] == "Acme Water"
 
         again = await client.post(
-            "/api/setup/admin", json={"username": "setup-test-b", "password": "long-enough-pw", "token": setup_token()}
+            "/api/setup/admin",
+            json={"username": "setup-test-b", "password": "long-enough-pw", "token": setup_token()},
         )
         assert again.status_code == 409
         assert (await client.get("/api/setup/status")).json() == {"needs_admin": False}
@@ -198,9 +231,9 @@ async def test_first_admin_needs_the_token_and_works_once(db):
         templates = (await client.get("/api/profiles/templates")).json()
         assert {t["id"] for t in templates} >= {"water_treatment", "real_estate", "clinic"}
 
-        res = await client.patch("/api/settings", json={"public_url": "calls.example.com"})
+        res = await client.patch("/api/platform/settings", json={"public_url": "calls.example.com"})
         assert res.status_code == 422  # scheme required
-        res = await client.patch("/api/settings", json={"public_url": "https://calls.example.com"})
+        res = await client.patch("/api/platform/settings", json={"public_url": "https://calls.example.com"})
         assert res.json()["public_url"]["value"] == "https://calls.example.com"
         # No Twilio credentials in the test environment: a clear "enter them" answer, not a crash.
         twilio = (await client.post("/api/settings/test-twilio")).json()
@@ -211,29 +244,31 @@ async def test_first_admin_needs_the_token_and_works_once(db):
 async def test_settings_routes_require_login(db):
     async with await _client() as client:
         assert (await client.get("/api/settings")).status_code == 401
+        assert (await client.get("/api/platform/settings")).status_code == 401
         assert (await client.get("/api/setup/checklist")).status_code == 401
         assert (await client.get("/api/setup/status")).status_code == 200  # public
 
 
 def test_flag_keys_cannot_overwrite_settings():
-    with pytest.raises(ValueError):
-        import asyncio
+    import asyncio
 
-        asyncio.run(settings_service.set_flag("twilio_auth_token", "x"))
+    with pytest.raises(ValueError):
+        asyncio.run(settings_service.set_flag(uuid.uuid4(), "twilio_auth_token", "x"))
 
 
 @needs_db
 async def test_creating_a_new_default_profile_moves_the_default(db):
     from audiocall.profiles import DEFAULT_RO_PROFILE
     from audiocall.services import profiles_service
+    from tests.dbhelpers import delete_orgs, make_org
 
-    old_default = await profiles_service.get_default_profile()
-    created = await profiles_service.create_profile(
-        {**DEFAULT_RO_PROFILE, "name": f"Default test {uuid.uuid4().hex[:6]}", "is_default": True}
-    )
+    org = await make_org()
     try:
-        assert (await profiles_service.get_default_profile()).id == created.id
-        assert (await profiles_service.get_profile(old_default.id)).is_default is False
+        old_default = await profiles_service.get_default_profile(org.id)
+        created = await profiles_service.create_profile(
+            org.id, {**DEFAULT_RO_PROFILE, "name": f"Default test {uuid.uuid4().hex[:6]}", "is_default": True}
+        )
+        assert (await profiles_service.get_default_profile(org.id)).id == created.id
+        assert (await profiles_service.get_profile(old_default.id, org.id)).is_default is False
     finally:
-        await profiles_service.update_profile(old_default.id, {"is_default": True})
-        await profiles_service.delete_profile(created.id)
+        await delete_orgs([org.id])

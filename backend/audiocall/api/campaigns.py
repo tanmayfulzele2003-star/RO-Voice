@@ -12,7 +12,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from audiocall.api.auth import require_admin
+from audiocall.api.auth import require_role, require_user
 from audiocall.api.schemas import (
     CampaignContactOut,
     CampaignCounts,
@@ -21,10 +21,9 @@ from audiocall.api.schemas import (
     CampaignOut,
 )
 from audiocall.services import campaigns_service, profiles_service
+from audiocall.services.team_service import UserContext
 
-router = APIRouter(
-    prefix="/api/campaigns", tags=["campaigns"], dependencies=[Depends(require_admin)]
-)
+router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
 
 def _counts(raw: dict[str, int]) -> CampaignCounts:
@@ -48,8 +47,8 @@ def _out(campaign, counts: dict[str, int]) -> CampaignOut:  # noqa: ANN001
     )
 
 
-async def _detail(campaign_id: uuid.UUID) -> CampaignDetailOut:
-    found = await campaigns_service.get_campaign_detail(campaign_id)
+async def _detail(campaign_id: uuid.UUID, org_id: uuid.UUID) -> CampaignDetailOut:
+    found = await campaigns_service.get_campaign_detail(campaign_id, org_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
     campaign, counts, contacts = found
@@ -73,45 +72,56 @@ async def _detail(campaign_id: uuid.UUID) -> CampaignDetailOut:
 
 
 @router.get("", response_model=list[CampaignOut])
-async def list_campaigns() -> list[CampaignOut]:
-    return [_out(c, counts) for c, counts in await campaigns_service.list_campaigns()]
+async def list_campaigns(user: UserContext = Depends(require_user)) -> list[CampaignOut]:
+    return [_out(c, counts) for c, counts in await campaigns_service.list_campaigns(user.org_id)]
 
 
 @router.post("", response_model=CampaignDetailOut, status_code=201)
-async def create_campaign(payload: CampaignCreate) -> CampaignDetailOut:
-    if payload.profile_id is not None and await profiles_service.get_profile(payload.profile_id) is None:
+async def create_campaign(
+    payload: CampaignCreate, user: UserContext = Depends(require_role("member"))
+) -> CampaignDetailOut:
+    if (
+        payload.profile_id is not None
+        and await profiles_service.get_profile(payload.profile_id, user.org_id) is None
+    ):
         raise HTTPException(status_code=422, detail="Business profile not found")
     data = payload.model_dump(exclude={"customer_ids"})
-    campaign = await campaigns_service.create_campaign(data, payload.customer_ids)
-    detail = await _detail(campaign.id)
+    campaign = await campaigns_service.create_campaign(user.org_id, data, payload.customer_ids)
+    detail = await _detail(campaign.id, user.org_id)
     if not detail.contacts:
-        await campaigns_service.delete_campaign(campaign.id)
+        await campaigns_service.delete_campaign(campaign.id, user.org_id)
         raise HTTPException(status_code=422, detail="None of the selected customers exist")
     return detail
 
 
 @router.get("/{campaign_id}", response_model=CampaignDetailOut)
-async def get_campaign(campaign_id: uuid.UUID) -> CampaignDetailOut:
-    return await _detail(campaign_id)
+async def get_campaign(
+    campaign_id: uuid.UUID, user: UserContext = Depends(require_user)
+) -> CampaignDetailOut:
+    return await _detail(campaign_id, user.org_id)
 
 
 @router.post("/{campaign_id}/{action}", response_model=CampaignDetailOut)
 async def change_campaign_status(
-    campaign_id: uuid.UUID, action: Literal["start", "pause", "cancel"]
+    campaign_id: uuid.UUID,
+    action: Literal["start", "pause", "cancel"],
+    user: UserContext = Depends(require_role("member")),
 ) -> CampaignDetailOut:
     try:
-        await campaigns_service.set_campaign_status(campaign_id, action)
+        await campaigns_service.set_campaign_status(campaign_id, action, user.org_id)
     except campaigns_service.CampaignNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except campaigns_service.InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return await _detail(campaign_id)
+    return await _detail(campaign_id, user.org_id)
 
 
 @router.delete("/{campaign_id}", status_code=204)
-async def delete_campaign(campaign_id: uuid.UUID) -> Response:
+async def delete_campaign(
+    campaign_id: uuid.UUID, user: UserContext = Depends(require_role("admin"))
+) -> Response:
     try:
-        deleted = await campaigns_service.delete_campaign(campaign_id)
+        deleted = await campaigns_service.delete_campaign(campaign_id, user.org_id)
     except campaigns_service.InvalidTransition as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if not deleted:

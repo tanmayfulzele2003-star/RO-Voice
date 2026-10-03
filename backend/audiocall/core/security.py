@@ -79,14 +79,17 @@ def verify_session_token(token: str) -> str | None:
     return username
 
 
-def verify_twilio_signature(url: str, params: dict[str, str], signature: str) -> bool:
+def verify_twilio_signature(url: str, params: dict[str, str], signature: str, auth_token: str) -> bool:
     """Validates Twilio's `X-Twilio-Signature` header for a webhook request.
 
     `url` must be the exact public URL Twilio requested (scheme + host from
     our own config, not necessarily what the app server sees behind a proxy)
-    including its query string; `params` is the POST form body.
+    including its query string; `params` is the POST form body; `auth_token`
+    is the token of the Twilio account the call belongs to.
     """
-    validator = RequestValidator(config.TWILIO_AUTH_TOKEN)
+    if not auth_token:
+        return False
+    validator = RequestValidator(auth_token)
     return validator.validate(url, params, signature)
 
 

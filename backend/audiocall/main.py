@@ -15,7 +15,6 @@ Outbound (ADK → Twilio) :  PCM-16 24 kHz →  μ-law 8 kHz
 
 Endpoints
 ---------
-POST /call           – Initiate an outbound call via Twilio REST API (legacy/manual)
 POST /voice          – Twilio voice webhook; returns TwiML <Connect><Stream>.
                        Inbound calls are routed by the dialled number (To).
 POST /call-status    – Twilio status callback (ringing / answered / no-answer / ...)
@@ -45,14 +44,12 @@ load_dotenv()
 from fastapi import FastAPI, HTTPException, Request, WebSocket  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
-from pydantic import BaseModel  # noqa: E402
 
 from audiocall import dialer  # noqa: E402
 from audiocall.api import api_router  # noqa: E402
 from audiocall.core import config  # noqa: E402
 from audiocall.core.config import (  # noqa: E402
     FRONTEND_ORIGIN,
-    MAX_CONCURRENT_CALLS,
     TRANSFER_RING_TIMEOUT_SECONDS,
     TWILIO_VALIDATE_SIGNATURE,
 )
@@ -69,6 +66,7 @@ from audiocall.services import (  # noqa: E402
     numbers_service,
     profiles_service,
     settings_service,
+    team_service,
     telephony,
 )
 from audiocall.voice.bridge import CallBridge  # noqa: E402
@@ -154,8 +152,10 @@ async def security_headers(request: Request, call_next):  # noqa: ANN001
 app.include_router(api_router)
 
 
-def _verify_twilio_webhook(request: Request, form: dict) -> None:
-    """Raises 403 unless the request carries a valid Twilio signature.
+async def _verify_twilio_webhook(request: Request, form: dict, org_id: uuid.UUID | None) -> None:
+    """Raises 403 unless the request carries a valid Twilio signature, made
+    with the auth token of the Twilio account the company (`org_id`) calls
+    through — its own, or the platform's.
 
     Reconstructs the URL from our own known scheme/host config rather than
     trusting `request.url` — behind a proxy/tunnel (ngrok), `request.url`
@@ -168,7 +168,8 @@ def _verify_twilio_webhook(request: Request, form: dict) -> None:
     url = f"{config.public_url()}{request.url.path}"
     if request.url.query:
         url += f"?{request.url.query}"
-    if not verify_twilio_signature(url, form, signature):
+    auth_token = (await settings_service.twilio_for(org_id)).auth_token
+    if not verify_twilio_signature(url, form, signature, auth_token):
         logger.warning(
             "Rejected %s: invalid X-Twilio-Signature for %s — if this is a real Twilio "
             "request, SERVER_HOST/USE_TLS don't match the URL Twilio called.",
@@ -189,47 +190,6 @@ async def health() -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# POST /call  – initiate an outbound call
-# ---------------------------------------------------------------------------
-class CallRequest(BaseModel):
-    customer_id: uuid.UUID
-
-
-@app.post("/call")
-async def make_call(payload: CallRequest) -> dict:
-    """
-    Initiate an outbound Twilio call that connects an existing customer to the
-    AI agent.
-
-    Request body (JSON):
-        {
-            "customer_id": "5b1e...-uuid"
-        }
-
-    Returns:
-        {
-            "call_id": "...",      // our `calls.id`
-            "call_sid": "CA...",   // Twilio's call SID
-            "status": "queued"
-        }
-    """
-    try:
-        call = await calls_service.start_outbound_call(payload.customer_id)
-    except calls_service.CustomerNotFound as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except calls_service.TwilioCallFailed as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Twilio could not place the call: {exc}"
-        ) from exc
-
-    return {
-        "call_id": str(call.id),
-        "call_sid": call.twilio_call_sid,
-        "status": call.status,
-    }
-
-
-# ---------------------------------------------------------------------------
 # POST /voice  – Twilio voice webhook (returns TwiML)
 # ---------------------------------------------------------------------------
 @app.post("/voice")
@@ -242,7 +202,6 @@ async def voice_webhook(request: Request) -> Response:
     """
     call_id_param = request.query_params.get("call_id")
     form = await request.form()
-    _verify_twilio_webhook(request, dict(form))
     twilio_call_sid = str(form.get("CallSid", ""))
 
     if call_id_param:
@@ -251,10 +210,14 @@ async def voice_webhook(request: Request) -> Response:
             call_id = uuid.UUID(call_id_param)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="Invalid call_id") from exc
+        call = await calls_service.get_call(call_id)
+        await _verify_twilio_webhook(request, dict(form), call.org_id if call else None)
+        if call is None:
+            raise HTTPException(status_code=404, detail="Unknown call")
         if twilio_call_sid:
             await calls_service.set_twilio_sid(call_id, twilio_call_sid)
     else:
-        twiml_or_call_id = await _route_inbound_call(form, twilio_call_sid)
+        twiml_or_call_id = await _route_inbound_call(request, form, twilio_call_sid)
         if isinstance(twiml_or_call_id, str):
             return Response(content=twiml_or_call_id, media_type="application/xml")
         call_id = twiml_or_call_id
@@ -266,27 +229,35 @@ async def voice_webhook(request: Request) -> Response:
     )
 
 
-async def _route_inbound_call(form, twilio_call_sid: str) -> uuid.UUID | str:  # noqa: ANN001
-    """Inbound call: nothing created a `calls` row yet. Route by the number
-    that was dialled (To) and return the new call_id — or TwiML to answer
-    with directly (number switched off, every line busy)."""
+async def _route_inbound_call(request: Request, form, twilio_call_sid: str) -> uuid.UUID | str:  # noqa: ANN001
+    """Inbound call: nothing created a `calls` row yet. The number that was
+    dialled (To) says which company and business answers; calls to a number
+    nobody registered go to the platform operator's own company. Returns the
+    new call_id — or TwiML to answer with directly (number switched off,
+    every line busy)."""
     from_number = str(form.get("From", ""))
     to_number = str(form.get("To", ""))
     number = await numbers_service.get_by_number(to_number) if to_number else None
+    org_id = number.org_id if number else await team_service.platform_org_id()
+    await _verify_twilio_webhook(request, dict(form), org_id)
+    if org_id is None:
+        logger.warning("Inbound call to %s but no company exists yet", to_number)
+        return telephony.say_and_hangup(telephony.NUMBER_DISABLED_MESSAGE)
     if number is not None and not (number.is_active and number.inbound_enabled):
         logger.info("Inbound call to disabled number %s rejected", to_number)
         return telephony.say_and_hangup(telephony.NUMBER_DISABLED_MESSAGE)
 
-    customer = await calls_service.get_or_create_customer_by_phone(from_number)
+    customer = await calls_service.get_or_create_customer_by_phone(org_id, from_number)
     # The business that was dialled answers; otherwise the customer's own.
     profile = await profiles_service.resolve_profile(
-        (number.profile_id if number else None) or customer.profile_id
+        org_id, (number.profile_id if number else None) or customer.profile_id
     )
-    busy = await calls_service.count_active_phone_calls() >= MAX_CONCURRENT_CALLS
+    busy = await calls_service.free_lines(org_id) <= 0
     call = await calls_service.create_call(
         customer.id,
         direction="inbound",
         profile_id=profile.id,
+        org_id=org_id,
         from_number=from_number,
         to_number=to_number,
         phone_number_id=number.id if number else None,
@@ -305,9 +276,7 @@ async def _route_inbound_call(form, twilio_call_sid: str) -> uuid.UUID | str:  #
     if busy:
         # Every AI line is taken: go straight to a person if there is one.
         if profile.transfer_number:
-            await events_service.record(
-                call.id, "capacity_transfer", f"all {MAX_CONCURRENT_CALLS} lines busy"
-            )
+            await events_service.record(call.id, "capacity_transfer", "all call lines busy")
             await calls_service.mark_capacity_transfer(call.id, profile.transfer_number)
             return telephony.dial_twiml(
                 profile.transfer_number,
@@ -316,7 +285,7 @@ async def _route_inbound_call(form, twilio_call_sid: str) -> uuid.UUID | str:  #
                 action_url=f"{config.public_url()}/transfer-status?call_id={call.id}",
                 announcement="Please hold while we connect you to our team.",
             )
-        await events_service.record(call.id, "capacity_busy", f"all {MAX_CONCURRENT_CALLS} lines busy")
+        await events_service.record(call.id, "capacity_busy", "all call lines busy")
         await calls_service.set_status(call.id, "failed", error_reason="capacity")
         return telephony.say_and_hangup(telephony.BUSY_MESSAGE)
     return call.id
@@ -332,8 +301,9 @@ async def call_status_webhook(request: Request) -> Response:
     `calls.create`). Updates the matching `calls` row's lifecycle status.
     """
     form = await request.form()
-    _verify_twilio_webhook(request, dict(form))
     twilio_call_sid = str(form.get("CallSid", ""))
+    call = await calls_service.get_call_by_twilio_sid(twilio_call_sid) if twilio_call_sid else None
+    await _verify_twilio_webhook(request, dict(form), call.org_id if call else None)
     twilio_status = str(form.get("CallStatus", ""))
     our_status = calls_service.map_twilio_status(twilio_status)
 
@@ -345,7 +315,6 @@ async def call_status_webhook(request: Request) -> Response:
             error_reason += f" sip={sip}"
 
     if twilio_call_sid:
-        call = await calls_service.get_call_by_twilio_sid(twilio_call_sid)
         if call is not None:
             if (
                 our_status == "completed"
@@ -381,11 +350,18 @@ async def call_status_webhook(request: Request) -> Response:
 # ---------------------------------------------------------------------------
 # Human transfer webhooks
 # ---------------------------------------------------------------------------
-def _call_id_param(request: Request) -> uuid.UUID:
+async def _verified_call_id(request: Request, form: dict) -> uuid.UUID:
+    """The call a transfer webhook is about, after checking the signature
+    with that call's company's Twilio token."""
     try:
-        return uuid.UUID(request.query_params.get("call_id", ""))
+        call_id = uuid.UUID(request.query_params.get("call_id", ""))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid call_id") from exc
+    call = await calls_service.get_call(call_id)
+    await _verify_twilio_webhook(request, form, call.org_id if call else None)
+    if call is None:
+        raise HTTPException(status_code=404, detail="Unknown call")
+    return call_id
 
 
 @app.post("/transfer-whisper")
@@ -393,8 +369,8 @@ async def transfer_whisper_webhook(request: Request) -> Response:
     """Played only to the person taking a transferred call, when they pick
     up and before the customer is connected: who's calling and why."""
     form = await request.form()
-    _verify_twilio_webhook(request, dict(form))
-    name, summary = await calls_service.transfer_context(_call_id_param(request))
+    call_id = await _verified_call_id(request, dict(form))
+    name, summary = await calls_service.transfer_context(call_id)
     return Response(content=telephony.whisper_twiml(name, summary), media_type="application/xml")
 
 
@@ -403,8 +379,7 @@ async def transfer_status_webhook(request: Request) -> Response:
     """The <Dial> to a person has ended. Answered: the conversation happened,
     hang up. Not answered: apologise, promise a callback, and record it."""
     form = await request.form()
-    _verify_twilio_webhook(request, dict(form))
-    call_id = _call_id_param(request)
+    call_id = await _verified_call_id(request, dict(form))
     dial_status = str(form.get("DialCallStatus", ""))
     if dial_status in ("completed", "answered"):
         duration = form.get("DialCallDuration")

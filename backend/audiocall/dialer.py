@@ -4,8 +4,9 @@ Runs as a background task in the FastAPI lifespan. Every tick it
   1. reconciles contacts whose call has ended (done, or retry later);
   2. for each running campaign, claims as many due contacts as there are
      free lines — min(campaign.max_concurrent − its live calls,
-     MAX_CONCURRENT_CALLS − all live phone calls) — and dials them, spaced to
-     respect Twilio's calls-per-second limit;
+     MAX_CONCURRENT_CALLS − all live phone calls, the company's plan limit −
+     its live calls) — and dials them through the company's Twilio account,
+     spaced to respect Twilio's calls-per-second limit;
   3. marks campaigns with nothing left to dial as completed.
 
 A failure that every call would hit (bad credentials, unreachable host, no
@@ -35,16 +36,20 @@ async def tick() -> int:
     placed = 0
     spacing = 1.0 / config.DIAL_CALLS_PER_SECOND if config.DIAL_CALLS_PER_SECOND > 0 else 0.0
     for campaign in await campaigns_service.running_campaigns():
-        global_free = config.MAX_CONCURRENT_CALLS - await calls_service.count_active_phone_calls()
-        if global_free <= 0:
-            break
-        contacts = await campaigns_service.claim_contacts(campaign, global_free)
+        # The platform's free lines, capped by the company's own plan limit.
+        free = await calls_service.free_lines(campaign.org_id)
+        if free <= 0:
+            continue
+        contacts = await campaigns_service.claim_contacts(campaign, free)
         for index, contact in enumerate(contacts):
             if placed:
                 await asyncio.sleep(spacing)
             try:
                 call = await calls_service.start_outbound_call(
-                    contact.customer_id, profile_id=campaign.profile_id, campaign_id=campaign.id
+                    contact.customer_id,
+                    org_id=campaign.org_id,
+                    profile_id=campaign.profile_id,
+                    campaign_id=campaign.id,
                 )
                 await campaigns_service.attach_call(contact.id, call.id)
             except calls_service.TwilioCallFailed as exc:

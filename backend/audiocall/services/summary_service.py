@@ -20,7 +20,7 @@ from audiocall import conversation
 from audiocall.db.models import Call, CallSummary, ConversationMessage, Requirement
 from audiocall.db.session import get_session_factory
 from audiocall.schemas import CallAnalysis
-from audiocall.services import calls_service, events_service, profiles_service
+from audiocall.services import calls_service, events_service
 from audiocall.services.outcome import outcome_from_analysis
 from audiocall.services.requirements_service import apply_fields
 
@@ -215,9 +215,10 @@ async def post_call_processing(call_id: uuid.UUID) -> None:
 
     try:
         context = await calls_service.load_call_context(call_id)
-        profile = context["profile"] if context else calls_service.profile_to_dict(
-            await profiles_service.get_default_profile()
-        )
+        if context is None:
+            logger.info("Call %s no longer exists — skipping AI analysis", call_id)
+            return
+        profile = context["profile"]
     except Exception:
         logger.exception("Call %s: failed to load business profile for analysis", call_id)
         return

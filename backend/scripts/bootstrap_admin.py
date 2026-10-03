@@ -11,8 +11,7 @@ import sys
 
 sys.path.insert(0, ".")  # allow running as `python scripts/bootstrap_admin.py` from backend/
 
-from audiocall.api.setup import admin_count  # noqa: E402
-from audiocall.services import auth_service  # noqa: E402
+from audiocall.services import team_service  # noqa: E402
 
 
 async def main() -> None:
@@ -20,13 +19,14 @@ async def main() -> None:
     password = os.environ.get("ADMIN_PASSWORD", "")
     if not (username and password):
         return
-    if await admin_count():
+    if await team_service.user_count():
         return
     if len(password) < 8:
         print("ADMIN_PASSWORD must be at least 8 characters; skipping admin creation.", file=sys.stderr)
         return
-    await auth_service.create_admin_user(username, password)
-    print(f"Created admin user {username!r} from ADMIN_USERNAME.")
+    company = os.environ.get("COMPANY_NAME", "").strip() or "My company"
+    await team_service.create_first_admin(username, password, company)
+    print(f"Created admin user {username!r} for {company!r} from ADMIN_USERNAME.")
 
 
 if __name__ == "__main__":

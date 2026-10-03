@@ -24,7 +24,7 @@ from audiocall.core import config
 from audiocall.db.models import Call, CallSummary, Customer
 from audiocall.db.session import get_session_factory
 from audiocall.phone import is_valid_e164
-from audiocall.services import events_service, numbers_service, profiles_service
+from audiocall.services import events_service, numbers_service, profiles_service, settings_service
 from audiocall.services.outcome import outcome_from_analysis, outcome_from_status
 
 logger = logging.getLogger(__name__)
@@ -133,23 +133,28 @@ def _apply_terminal_outcome(call: Call) -> None:
         call.outcome = outcome_from_status(call.status, call.error_reason)
 
 
-async def get_customer(customer_id: uuid.UUID) -> Customer:
+async def get_customer(customer_id: uuid.UUID, org_id: uuid.UUID | None = None) -> Customer:
+    """The customer; with `org_id`, only if they belong to that company."""
     async with get_session_factory()() as session:
         customer = await session.get(Customer, customer_id)
-        if customer is None:
+        if customer is None or (org_id is not None and customer.org_id != org_id):
             raise CustomerNotFound(f"No customer with id {customer_id}")
         return customer
 
 
-async def get_or_create_customer_by_phone(phone: str) -> Customer:
+async def get_or_create_customer_by_phone(org_id: uuid.UUID, phone: str) -> Customer:
     """Used for inbound calls, where there is no prior /call request to look up."""
     async with get_session_factory()() as session:
-        result = await session.execute(select(Customer).where(Customer.phone == phone))
-        customer = result.scalar_one_or_none()
+        customer = await session.scalar(
+            select(Customer)
+            .where(Customer.org_id == org_id, Customer.phone == phone)
+            .order_by(Customer.created_at)
+            .limit(1)
+        )
         if customer is not None:
             return customer
 
-        customer = Customer(name="Unknown caller", phone=phone)
+        customer = Customer(org_id=org_id, name="Unknown caller", phone=phone)
         session.add(customer)
         await session.commit()
         await session.refresh(customer)
@@ -162,6 +167,7 @@ async def create_call(
     channel: str = "phone",
     profile_id: uuid.UUID | None = None,
     *,
+    org_id: uuid.UUID,
     from_number: str | None = None,
     to_number: str | None = None,
     phone_number_id: uuid.UUID | None = None,
@@ -169,6 +175,7 @@ async def create_call(
 ) -> Call:
     async with get_session_factory()() as session:
         call = Call(
+            org_id=org_id,
             customer_id=customer_id,
             direction=direction,
             channel=channel,
@@ -192,24 +199,41 @@ def active_call_window() -> timedelta:
     return timedelta(seconds=config.RING_TIMEOUT_SECONDS + config.MAX_CALL_SECONDS + 120)
 
 
-async def count_active_phone_calls() -> int:
-    """Phone calls currently holding a line (manual, campaign and inbound)."""
+async def count_active_phone_calls(org_id: uuid.UUID | None = None) -> int:
+    """Phone calls currently holding an AI line (manual, campaign and inbound),
+    across the platform or for one company."""
     cutoff = datetime.now(timezone.utc) - active_call_window()
-    async with get_session_factory()() as session:
-        return (
-            await session.scalar(
-                select(func.count())
-                .select_from(Call)
-                .where(
-                    Call.channel == "phone",
-                    Call.status.in_(_ACTIVE_STATUSES),
-                    Call.created_at >= cutoff,
-                    # Handed to a person: the line is up but no AI session is used.
-                    Call.transferred_to.is_(None),
-                )
-            )
-            or 0
+    query = (
+        select(func.count())
+        .select_from(Call)
+        .where(
+            Call.channel == "phone",
+            Call.status.in_(_ACTIVE_STATUSES),
+            Call.created_at >= cutoff,
+            # Handed to a person: the line is up but no AI session is used.
+            Call.transferred_to.is_(None),
         )
+    )
+    if org_id is not None:
+        query = query.where(Call.org_id == org_id)
+    async with get_session_factory()() as session:
+        return await session.scalar(query) or 0
+
+
+async def free_lines(org_id: uuid.UUID) -> int:
+    """How many more phone calls may start now for this company: the lower
+    of the platform's free lines (MAX_CONCURRENT_CALLS) and the company's
+    own plan limit, if it has one."""
+    free = config.MAX_CONCURRENT_CALLS - await count_active_phone_calls()
+    from audiocall.db.models import Organization
+
+    async with get_session_factory()() as session:
+        org_limit = await session.scalar(
+            select(Organization.max_concurrent_calls).where(Organization.id == org_id)
+        )
+    if org_limit is not None:
+        free = min(free, org_limit - await count_active_phone_calls(org_id))
+    return max(free, 0)
 
 
 async def set_outcome(call_id: uuid.UUID, outcome: str) -> None:
@@ -345,28 +369,33 @@ async def record_agent_assessment(
 
 async def start_outbound_call(
     customer_id: uuid.UUID,
+    org_id: uuid.UUID | None = None,
     profile_id: uuid.UUID | None = None,
     campaign_id: uuid.UUID | None = None,
 ) -> Call:
     """Look up the customer, create a `calls` row, pick a caller ID from the
-    number pool, and dial via Twilio.
+    company's number pool, and dial through the company's Twilio account.
 
     Shared by `POST /call`, the dashboard's `POST /api/calls` and the
-    campaign dialer. `profile_id` overrides the customer's profile (campaigns).
+    campaign dialer. With `org_id`, the customer must belong to that company.
+    `profile_id` overrides the customer's profile (campaigns).
     Raises `CustomerNotFound` or `TwilioCallFailed`; callers translate these to
     the appropriate HTTP response. A failure is also recorded on the call row
     (status=failed + a call event) so it shows up in the dashboard.
     """
-    customer = await get_customer(customer_id)
-    profile = await profiles_service.resolve_profile(profile_id or customer.profile_id)
+    customer = await get_customer(customer_id, org_id)
+    org_id = customer.org_id
+    profile = await profiles_service.resolve_profile(org_id, profile_id or customer.profile_id)
     call = await create_call(
         customer.id,
         direction="outbound",
         channel="phone",
         profile_id=profile.id,
+        org_id=org_id,
         to_number=customer.phone,
         campaign_id=campaign_id,
     )
+    account = await settings_service.twilio_for(org_id)
 
     async def fail(event_type: str, reason: str, config_error: bool = False) -> TwilioCallFailed:
         logger.error("Outbound call %s failed: %s", call.id, reason)
@@ -379,10 +408,10 @@ async def start_outbound_call(
             "invalid_number",
             f"'{customer.phone}' is not a valid E.164 phone number (e.g. +919876543210).",
         )
-    if not (config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN):
+    if not account.configured:
         raise await fail(
             "provider_error",
-            "Twilio is not configured (TWILIO_* env vars are empty). Use 'Browser call' "
+            "Twilio is not configured — connect it in Settings. Use 'Browser call' "
             "to demo the agent without a telephony provider.",
             config_error=True,
         )
@@ -394,12 +423,12 @@ async def start_outbound_call(
             config_error=True,
         )
 
-    picked = await numbers_service.pick_outbound_number(profile.id)
+    picked = await numbers_service.pick_outbound_number(org_id, profile.id)
     if picked is None:
         raise await fail(
             "provider_error",
             "No caller number available: add an outbound-enabled number under Phone numbers, "
-            "or set TWILIO_PHONE_NUMBER.",
+            "or a default caller number in Settings.",
             config_error=True,
         )
     from_number, phone_number_id = picked
@@ -409,7 +438,7 @@ async def start_outbound_call(
         # The Twilio SDK is synchronous — run it off the event loop so a slow
         # API round-trip doesn't stall live audio for calls already running.
         twilio_call = await asyncio.to_thread(
-            config.twilio_client.calls.create,
+            account.client.calls.create,
             to=customer.phone,
             from_=from_number,
             url=f"{config.HTTP_SCHEME}://{config.SERVER_HOST}/voice?call_id={call.id}",
@@ -450,17 +479,17 @@ async def _set_caller(call_id: uuid.UUID, from_number: str, phone_number_id: uui
         await session.commit()
 
 
-async def start_browser_call(customer_id: uuid.UUID) -> Call:
+async def start_browser_call(customer_id: uuid.UUID, org_id: uuid.UUID) -> Call:
     """Create a call row for the browser (WebRTC microphone) demo channel.
 
     No telephony provider is involved: the dashboard opens `/browser-stream`
     and plays the customer's side itself. Everything downstream — agent,
     transcript, events, analysis — is identical to a phone call.
     """
-    customer = await get_customer(customer_id)
-    profile = await profiles_service.resolve_profile(customer.profile_id)
+    customer = await get_customer(customer_id, org_id)
+    profile = await profiles_service.resolve_profile(org_id, customer.profile_id)
     call = await create_call(
-        customer.id, direction="outbound", channel="browser", profile_id=profile.id
+        customer.id, direction="outbound", channel="browser", profile_id=profile.id, org_id=org_id
     )
     await events_service.record(call.id, "call_initiated", "Browser (WebRTC) call")
     return call
@@ -471,10 +500,20 @@ async def get_call(call_id: uuid.UUID) -> Call | None:
         return await session.get(Call, call_id)
 
 
+async def _twilio_client_for_sid(twilio_call_sid: str):  # noqa: ANN202
+    """The Twilio client of the company whose call this is."""
+    async with get_session_factory()() as session:
+        org_id = await session.scalar(
+            select(Call.org_id).where(Call.twilio_call_sid == twilio_call_sid)
+        )
+    return (await settings_service.twilio_for(org_id)).client
+
+
 async def redirect_phone_call(twilio_call_sid: str, twiml: str) -> bool:
     """Replace a live call's TwiML (ends its media stream). False on failure."""
     try:
-        await asyncio.to_thread(config.twilio_client.calls(twilio_call_sid).update, twiml=twiml)
+        client = await _twilio_client_for_sid(twilio_call_sid)
+        await asyncio.to_thread(client.calls(twilio_call_sid).update, twiml=twiml)
         return True
     except Exception:
         logger.exception("Could not redirect Twilio call %s", twilio_call_sid)
@@ -485,20 +524,18 @@ async def hang_up_phone_call(twilio_call_sid: str, apology: str | None = None) -
     """End a live Twilio call. With `apology`, speak it first (used when the
     AI fails mid-call, so the customer isn't left in dead air)."""
     try:
+        client = await _twilio_client_for_sid(twilio_call_sid)
         if apology:
             twiml = f"<Response><Say>{xml_escape(apology)}</Say><Hangup/></Response>"
-            await asyncio.to_thread(
-                config.twilio_client.calls(twilio_call_sid).update, twiml=twiml
-            )
+            await asyncio.to_thread(client.calls(twilio_call_sid).update, twiml=twiml)
         else:
-            await asyncio.to_thread(
-                config.twilio_client.calls(twilio_call_sid).update, status="completed"
-            )
+            await asyncio.to_thread(client.calls(twilio_call_sid).update, status="completed")
     except Exception:
         logger.exception("Could not hang up Twilio call %s", twilio_call_sid)
 
 
 async def list_calls(
+    org_id: uuid.UUID,
     limit: int = 20,
     offset: int = 0,
     status: str | None = None,
@@ -528,7 +565,7 @@ async def list_calls(
             .outerjoin(CallSummary, CallSummary.call_id == Call.id)
         )
 
-        conditions = []
+        conditions = [Call.org_id == org_id]
         if status is not None:
             conditions.append(Call.status == status)
         if lead_status is not None:
@@ -568,9 +605,9 @@ async def list_calls(
         return rows, total
 
 
-async def get_call_detail(call_id: uuid.UUID) -> dict | None:
+async def get_call_detail(call_id: uuid.UUID, org_id: uuid.UUID) -> dict | None:
     """Returns a dict with the call, its customer, transcript, requirements,
-    and summary — or None if the call doesn't exist."""
+    and summary — or None if the call doesn't exist in this company."""
     async with get_session_factory()() as session:
         call = await session.get(
             Call,
@@ -584,9 +621,9 @@ async def get_call_detail(call_id: uuid.UUID) -> dict | None:
                 selectinload(Call.profile),
             ],
         )
-        if call is None:
+        if call is None or call.org_id != org_id:
             return None
-        profile = call.profile or await profiles_service.get_default_profile()
+        profile = call.profile or await profiles_service.get_default_profile(org_id)
         return {
             "call": call,
             "customer": call.customer,
@@ -623,7 +660,7 @@ async def load_call_context(call_id: uuid.UUID) -> dict | None:
             return None
         customer = call.customer
         profile_id = call.profile_id or customer.profile_id
-    profile = await profiles_service.resolve_profile(profile_id)
+    profile = await profiles_service.resolve_profile(call.org_id, profile_id)
     if call.profile_id is None:
         # Inbound calls (and calls from before profiles existed) — pin the
         # profile that actually ran.
@@ -661,11 +698,13 @@ async def get_call_by_twilio_sid(twilio_call_sid: str) -> Call | None:
         return await session.scalar(select(Call).where(Call.twilio_call_sid == twilio_call_sid))
 
 
-async def profile_names() -> dict[uuid.UUID, str]:
+async def profile_names(org_id: uuid.UUID) -> dict[uuid.UUID, str]:
     from audiocall.db.models import BusinessProfile
 
     async with get_session_factory()() as session:
-        result = await session.execute(select(BusinessProfile.id, BusinessProfile.name))
+        result = await session.execute(
+            select(BusinessProfile.id, BusinessProfile.name).where(BusinessProfile.org_id == org_id)
+        )
         return {row.id: row.name for row in result}
 
 

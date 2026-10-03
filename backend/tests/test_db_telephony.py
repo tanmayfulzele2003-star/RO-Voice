@@ -13,7 +13,6 @@ from xml.etree import ElementTree
 
 import httpx
 import pytest
-from sqlalchemy import text
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_DB_TESTS") != "1", reason="needs RUN_DB_TESTS=1 and a migrated Postgres"
@@ -38,60 +37,33 @@ def _phone() -> str:
 
 @pytest.fixture
 async def db():
+    from tests.dbhelpers import delete_orgs, make_org
+
     # The engine is cached per process, but each test has its own event loop.
     db_session.get_engine.cache_clear()
-    created = {"customers": [], "profiles": [], "numbers": [], "campaigns": []}
+    org = await make_org()
+    created = {"org": org.id, "orgs": [org.id]}
     yield created
-    async with db_session.get_engine().begin() as conn:
-        customers = created["customers"]
-        if created["campaigns"]:
-            await conn.execute(
-                text("DELETE FROM campaigns WHERE id = ANY(:ids)"), {"ids": created["campaigns"]}
-            )
-        if customers:
-            calls = "SELECT id FROM calls WHERE customer_id = ANY(:ids)"
-            for table in ("call_events", "conversation_messages", "requirements", "call_summaries"):
-                await conn.execute(
-                    text(f"DELETE FROM {table} WHERE call_id IN ({calls})"), {"ids": customers}
-                )
-            await conn.execute(
-                text("DELETE FROM campaign_contacts WHERE customer_id = ANY(:ids)"), {"ids": customers}
-            )
-            await conn.execute(text("DELETE FROM calls WHERE customer_id = ANY(:ids)"), {"ids": customers})
-            await conn.execute(text("DELETE FROM customers WHERE id = ANY(:ids)"), {"ids": customers})
-        if created["numbers"]:
-            await conn.execute(
-                text("DELETE FROM phone_numbers WHERE id = ANY(:ids)"), {"ids": created["numbers"]}
-            )
-        if created["profiles"]:
-            await conn.execute(
-                text("DELETE FROM business_profiles WHERE id = ANY(:ids)"), {"ids": created["profiles"]}
-            )
+    await delete_orgs(created["orgs"])
     await db_session.get_engine().dispose()
 
 
 async def _profile(db, **extra):
-    profile = await profiles_service.create_profile(
-        {**DEFAULT_RO_PROFILE, "name": f"Test {uuid.uuid4().hex[:6]}", **extra}
+    return await profiles_service.create_profile(
+        db["org"], {**DEFAULT_RO_PROFILE, "name": f"Test {uuid.uuid4().hex[:6]}", **extra}
     )
-    db["profiles"].append(profile.id)
-    return profile
 
 
 async def _number(db, **data):
-    row = await numbers_service.create_number({"number": _phone(), **data})
-    db["numbers"].append(row.id)
-    return row
+    return await numbers_service.create_number(db["org"], {"number": _phone(), **data})
 
 
 async def _customer(db, phone=None, profile_id=None):
     from audiocall.services import customers_service
 
-    customer = await customers_service.create_customer(
-        {"name": "Test Customer", "phone": phone or _phone(), "profile_id": profile_id}
+    return await customers_service.create_customer(
+        db["org"], {"name": "Test Customer", "phone": phone or _phone(), "profile_id": profile_id}
     )
-    db["customers"].append(customer.id)
-    return customer
 
 
 # ── Number pool ──────────────────────────────────────────────────────────────
@@ -101,19 +73,25 @@ async def test_outbound_number_round_robin_then_shared_pool_then_env(db, monkeyp
     a = await _number(db, profile_id=sales.id)
     b = await _number(db, profile_id=sales.id)
     await _number(db, profile_id=sales.id, outbound_enabled=False)  # never picked
-    picks = [(await numbers_service.pick_outbound_number(sales.id))[0] for _ in range(3)]
+    picks = [(await numbers_service.pick_outbound_number(db["org"], sales.id))[0] for _ in range(3)]
     assert picks == [a.number, b.number, a.number]
 
     # Another profile with no numbers of its own uses the shared pool …
     shared = await _number(db)
-    assert await numbers_service.pick_outbound_number(other.id) == (shared.number, shared.id)
+    assert await numbers_service.pick_outbound_number(db["org"], other.id) == (shared.number, shared.id)
 
-    # … and with nothing usable in the pool, the env number.
-    await numbers_service.update_number(shared.id, {"is_active": False})
+    # … and with nothing usable in the pool, the platform's default number.
+    await numbers_service.update_number(shared.id, db["org"], {"is_active": False})
     monkeypatch.setattr(config, "TWILIO_PHONE_NUMBER", "+15550000000")
-    picked = await numbers_service.pick_outbound_number(other.id)
-    if picked[1] is None:  # other shared numbers may exist in a dev database
-        assert picked == ("+15550000000", None)
+    assert await numbers_service.pick_outbound_number(db["org"], other.id) == ("+15550000000", None)
+
+    # Another company never gets this company's numbers.
+    from tests.dbhelpers import make_org
+
+    rival = await make_org()
+    db["orgs"].append(rival.id)
+    await numbers_service.update_number(shared.id, db["org"], {"is_active": True})
+    assert await numbers_service.pick_outbound_number(rival.id, None) == ("+15550000000", None)
 
 
 # ── Inbound routing + transfer webhooks ──────────────────────────────────────
@@ -135,7 +113,7 @@ async def test_inbound_call_routed_by_dialled_number(db):
     call_id = uuid.UUID(root.find("./Connect/Stream/Parameter").get("value"))
 
     call = await calls_service.get_call(call_id)
-    db["customers"].append(call.customer_id)
+    assert call.org_id == db["org"]  # the company that owns the dialled number
     assert call.direction == "inbound"
     assert call.profile_id == solar.id  # the dialled business answers
     assert (call.from_number, call.to_number, call.phone_number_id) == (caller, number.number, number.id)
@@ -152,9 +130,7 @@ async def test_inbound_to_disabled_number_is_declined(db):
 
 
 async def test_inbound_over_capacity_goes_to_a_person(db, monkeypatch):
-    from audiocall import main
-
-    monkeypatch.setattr(main, "MAX_CONCURRENT_CALLS", 0)
+    monkeypatch.setattr(config, "MAX_CONCURRENT_CALLS", 0)
     profile = await _profile(db, transfer_number="+15559990000")
     number = await _number(db, profile_id=profile.id)
     customer = await _customer(db)
@@ -170,7 +146,7 @@ async def test_inbound_over_capacity_goes_to_a_person(db, monkeypatch):
 
 async def test_transfer_status_fallback_and_whisper(db):
     customer = await _customer(db)
-    call = await calls_service.create_call(customer.id, direction="outbound")
+    call = await calls_service.create_call(customer.id, direction="outbound", org_id=db["org"])
     from audiocall.services import events_service
 
     await events_service.record(call.id, "transfer_requested", "Wants a 500 LPH quote")
@@ -192,8 +168,10 @@ async def test_campaign_dials_in_parallel_retries_and_completes(db, monkeypatch)
     monkeypatch.setattr(config, "DIAL_CALLS_PER_SECOND", 0)
     dialled = []
 
-    async def fake_start(customer_id, profile_id=None, campaign_id=None):
-        call = await calls_service.create_call(customer_id, "outbound", campaign_id=campaign_id)
+    async def fake_start(customer_id, org_id=None, profile_id=None, campaign_id=None):
+        call = await calls_service.create_call(
+            customer_id, "outbound", org_id=org_id, campaign_id=campaign_id
+        )
         dialled.append(customer_id)
         return call
 
@@ -201,10 +179,10 @@ async def test_campaign_dials_in_parallel_retries_and_completes(db, monkeypatch)
 
     customers = [await _customer(db) for _ in range(3)]
     campaign = await campaigns_service.create_campaign(
+        db["org"],
         {"name": "Test", "max_concurrent": 2, "max_attempts": 2, "retry_delay_minutes": 1},
         [c.id for c in customers] + [customers[0].id],  # duplicate ignored
     )
-    db["campaigns"].append(campaign.id)
     assert await dialer.tick() == 0  # draft: nothing dials
 
     await campaigns_service.set_campaign_status(campaign.id, "start")
@@ -250,16 +228,18 @@ async def test_dialer_respects_global_line_limit(db, monkeypatch):
     busy = await calls_service.count_active_phone_calls()
     monkeypatch.setattr(config, "MAX_CONCURRENT_CALLS", busy + 1)
 
-    async def fake_start(customer_id, profile_id=None, campaign_id=None):
-        return await calls_service.create_call(customer_id, "outbound", campaign_id=campaign_id)
+    async def fake_start(customer_id, org_id=None, profile_id=None, campaign_id=None):
+        return await calls_service.create_call(
+            customer_id, "outbound", org_id=org_id, campaign_id=campaign_id
+        )
 
     monkeypatch.setattr(dialer.calls_service, "start_outbound_call", fake_start)
     customers = [await _customer(db) for _ in range(3)]
     campaign = await campaigns_service.create_campaign(
+        db["org"],
         {"name": "Test", "max_concurrent": 10, "max_attempts": 1, "retry_delay_minutes": 1},
         [c.id for c in customers],
     )
-    db["campaigns"].append(campaign.id)
     await campaigns_service.set_campaign_status(campaign.id, "start")
     assert await dialer.tick() == 1
 
@@ -267,10 +247,10 @@ async def test_dialer_respects_global_line_limit(db, monkeypatch):
 async def test_cancel_drops_pending_contacts(db):
     customers = [await _customer(db) for _ in range(2)]
     campaign = await campaigns_service.create_campaign(
+        db["org"],
         {"name": "Test", "max_concurrent": 1, "max_attempts": 1, "retry_delay_minutes": 1},
         [c.id for c in customers],
     )
-    db["campaigns"].append(campaign.id)
     await campaigns_service.set_campaign_status(campaign.id, "start")
     await campaigns_service.set_campaign_status(campaign.id, "cancel")
     _, counts, _ = await campaigns_service.get_campaign_detail(campaign.id)
@@ -286,10 +266,10 @@ async def test_failed_dial_is_linked_for_retry(db, monkeypatch):
     monkeypatch.setattr(config, "DIAL_CALLS_PER_SECOND", 0)
     customer = await _customer(db, phone="12345")  # not E.164: fails for this customer only
     campaign = await campaigns_service.create_campaign(
+        db["org"],
         {"name": "Test", "max_concurrent": 1, "max_attempts": 2, "retry_delay_minutes": 1},
         [customer.id],
     )
-    db["campaigns"].append(campaign.id)
     await campaigns_service.set_campaign_status(campaign.id, "start")
     await dialer.tick()
     await dialer.tick()  # reconcile the failed call
@@ -306,10 +286,10 @@ async def test_config_error_pauses_campaign_without_spending_attempts(db, monkey
     monkeypatch.setattr(config, "TWILIO_ACCOUNT_SID", "")  # every call would fail
     customers = [await _customer(db) for _ in range(3)]
     campaign = await campaigns_service.create_campaign(
+        db["org"],
         {"name": "Test", "max_concurrent": 3, "max_attempts": 2, "retry_delay_minutes": 1},
         [c.id for c in customers],
     )
-    db["campaigns"].append(campaign.id)
     await campaigns_service.set_campaign_status(campaign.id, "start")
     assert await dialer.tick() == 0  # stops at the first config failure, nothing placed
 

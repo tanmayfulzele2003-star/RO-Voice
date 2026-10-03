@@ -53,14 +53,23 @@ def next_contact_state(
 
 
 # ── CRUD ─────────────────────────────────────────────────────────────────────
-async def create_campaign(data: dict[str, Any], customer_ids: list[uuid.UUID]) -> Campaign:
+async def create_campaign(
+    org_id: uuid.UUID, data: dict[str, Any], customer_ids: list[uuid.UUID]
+) -> Campaign:
+    """Customers outside the company are silently left out."""
     async with get_session_factory()() as session:
         found = set(
-            (await session.execute(select(Customer.id).where(Customer.id.in_(customer_ids))))
+            (
+                await session.execute(
+                    select(Customer.id).where(
+                        Customer.id.in_(customer_ids), Customer.org_id == org_id
+                    )
+                )
+            )
             .scalars()
             .all()
         )
-        campaign = Campaign(status="draft", **data)
+        campaign = Campaign(org_id=org_id, status="draft", **data)
         session.add(campaign)
         await session.flush()
         seen: set[uuid.UUID] = set()
@@ -73,10 +82,16 @@ async def create_campaign(data: dict[str, Any], customer_ids: list[uuid.UUID]) -
         return campaign
 
 
-async def list_campaigns() -> list[tuple[Campaign, dict[str, int]]]:
+async def list_campaigns(org_id: uuid.UUID) -> list[tuple[Campaign, dict[str, int]]]:
     async with get_session_factory()() as session:
         campaigns = list(
-            (await session.execute(select(Campaign).order_by(Campaign.created_at.desc())))
+            (
+                await session.execute(
+                    select(Campaign)
+                    .where(Campaign.org_id == org_id)
+                    .order_by(Campaign.created_at.desc())
+                )
+            )
             .scalars()
             .all()
         )
@@ -85,11 +100,12 @@ async def list_campaigns() -> list[tuple[Campaign, dict[str, int]]]:
 
 
 async def get_campaign_detail(
-    campaign_id: uuid.UUID,
+    campaign_id: uuid.UUID, org_id: uuid.UUID | None = None
 ) -> tuple[Campaign, dict[str, int], list[CampaignContact]] | None:
+    """With `org_id`, None unless the campaign belongs to that company."""
     async with get_session_factory()() as session:
         campaign = await session.get(Campaign, campaign_id)
-        if campaign is None:
+        if campaign is None or (org_id is not None and campaign.org_id != org_id):
             return None
         contacts = list(
             (
@@ -121,7 +137,9 @@ async def _contact_counts(session, campaign_ids: list[uuid.UUID]) -> dict[uuid.U
     return counts
 
 
-async def set_campaign_status(campaign_id: uuid.UUID, action: str) -> Campaign:
+async def set_campaign_status(
+    campaign_id: uuid.UUID, action: str, org_id: uuid.UUID | None = None
+) -> Campaign:
     """start | pause | cancel. Pausing stops new dials; calls already
     connected finish normally. Cancelling also drops pending contacts."""
     allowed = {
@@ -131,7 +149,7 @@ async def set_campaign_status(campaign_id: uuid.UUID, action: str) -> Campaign:
     }
     async with get_session_factory()() as session:
         campaign = await session.get(Campaign, campaign_id, with_for_update=True)
-        if campaign is None:
+        if campaign is None or (org_id is not None and campaign.org_id != org_id):
             raise CampaignNotFound(f"No campaign with id {campaign_id}")
         if campaign.status not in allowed[action]:
             raise InvalidTransition(f"Can't {action} a {campaign.status} campaign")
@@ -158,10 +176,10 @@ async def set_campaign_status(campaign_id: uuid.UUID, action: str) -> Campaign:
         return campaign
 
 
-async def delete_campaign(campaign_id: uuid.UUID) -> bool:
+async def delete_campaign(campaign_id: uuid.UUID, org_id: uuid.UUID | None = None) -> bool:
     async with get_session_factory()() as session:
         campaign = await session.get(Campaign, campaign_id)
-        if campaign is None:
+        if campaign is None or (org_id is not None and campaign.org_id != org_id):
             return False
         if campaign.status in ("running", "paused"):
             raise InvalidTransition("Cancel the campaign before deleting it")
