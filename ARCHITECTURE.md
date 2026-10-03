@@ -272,6 +272,28 @@ Twilio run out of TwiML and hang up.
   writes the summary, but it never overwrites the `transferred` or `callback` outcome. The AI
   part of the transcript is kept. The human part isn't recorded.
 
+## Installation and settings
+
+* **Docker:** `install.sh` writes `.env` (random `SESSION_SECRET` and database password) and
+  runs `docker-compose.yml`: Postgres, the backend (its entrypoint runs `alembic upgrade head`,
+  then optionally creates the admin from `ADMIN_USERNAME` and `ADMIN_PASSWORD`), and the
+  dashboard (a Next.js standalone build). The `https` profile adds Caddy, which handles
+  Let's Encrypt and serves both on one domain, sending backend paths to FastAPI. Server-side
+  rendering reaches the API at `API_INTERNAL_URL=http://backend:8000`. The browser uses the
+  public URL baked in at build time.
+* **First admin:** while `admin_users` is empty, the server logs
+  `/setup?token=…`. The token is an HMAC of `SESSION_SECRET` (or `SETUP_TOKEN`), so every process
+  agrees on it and nothing is stored. `POST /api/setup/admin` takes a table lock so only one
+  first admin can be created, and stops working once one exists.
+* **Settings from the dashboard** (`app_settings`, `services/settings_service.py`): the Twilio
+  SID, token and caller number, the Gemini key and the public URL. Saved values override the
+  environment, and clearing one falls back to it. Secrets are Fernet-encrypted with a key
+  derived from `SETTINGS_ENCRYPTION_KEY` or `SESSION_SECRET`. A secret that can't be decrypted,
+  for example after the key changed, is ignored and logged, never fatal. Applying settings
+  updates `core.config` in place, rebuilds the Twilio client and drops the cached Gemini
+  clients, so new calls use the new key. Every process reloads every 30 s. Code reads these as
+  `config.NAME` at call time for that reason.
+
 ## Outcome vs. status
 
 `status` is the telephony lifecycle (`queued, ringing, in_progress, completed, failed, no_answer,
@@ -293,7 +315,7 @@ terminal, and refined by the agent's verdict and then the AI analysis (`services
 
 ## Database
 
-Ten domain tables plus `admin_users` and `alembic_version`. Full column list in
+Ten domain tables plus `app_settings`, `admin_users` and `alembic_version`. Full column list in
 [database/schema.sql](database/schema.sql). Migrations in `backend/alembic/versions/` are the
 source of truth.
 

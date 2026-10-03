@@ -53,7 +53,47 @@ call.
 
 ---
 
-## Setup instructions
+## Quick start with Docker (recommended)
+
+Needs only Docker. On your computer:
+
+```bash
+git clone https://github.com/tanmayfulzele2003-star/RO-Voice.git
+cd RO-Voice
+./install.sh
+```
+
+It creates `.env` with fresh secrets, starts PostgreSQL, the API and the dashboard, and prints a
+one-time link like `http://localhost:3000/setup?token=…`. Open it, create your admin account, and
+the **Get started** checklist walks you through the rest in the browser:
+
+1. **Connect Twilio:** paste the Account SID and Auth Token, test them, and add the account's
+   numbers with one click.
+2. **Connect Gemini:** paste an API key from [AI Studio](https://aistudio.google.com/apikey).
+3. **Set the public URL:** where Twilio reaches the server. It's checked for you.
+4. **Set up your business:** start from an industry template (real estate, clinic, solar,
+   insurance, education, hotel, RO, or general) and edit it.
+5. **Make a test call:** to your own phone, or in the browser with no Twilio at all.
+
+Keys entered in the dashboard are stored encrypted in the database and take effect without a
+restart. Environment variables still work and act as the fallback.
+
+**On a server with HTTPS** (no ngrok): point a domain's DNS at the server, open ports 80 and 443,
+then run
+
+```bash
+./install.sh calls.example.com
+```
+
+Caddy gets a Let's Encrypt certificate automatically and serves the dashboard and API on that
+domain, and the public URL is already set. Other useful commands are `docker compose logs -f backend`,
+`docker compose down` (data stays in the `db-data` volume), and `git pull && ./install.sh` to upgrade.
+Migrations run on every start.
+
+For unattended installs, put `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `.env` to create the admin
+without the link.
+
+## Setup instructions (without Docker)
 
 ### 1. Clone the project
 
@@ -355,6 +395,11 @@ need the admin session cookie.
 | `GET` / `POST` | `/api/campaigns` | List / create campaigns (`name, customer_ids, profile_id, max_concurrent, max_attempts, retry_delay_minutes`) |
 | `GET` / `DELETE` | `/api/campaigns/{id}` | Campaign with per-contact progress / delete a finished campaign |
 | `POST` | `/api/campaigns/{id}/start` · `/pause` · `/cancel` | Control the dialer for a campaign |
+| `GET` / `PATCH` | `/api/settings` | Twilio credentials, caller number, Gemini key, public URL (secrets masked on read, encrypted at rest) |
+| `POST` | `/api/settings/test-twilio` · `/test-gemini` · `/test-public-url` | Check each connection; the Twilio test lists the account's numbers |
+| `GET` / `POST` | `/api/setup/status` · `/api/setup/admin` | First run: whether an admin exists; create it with the one-time setup token (public) |
+| `GET` | `/api/setup/checklist` | Setup progress |
+| `GET` | `/api/profiles/templates` | Industry starting points for a business profile |
 | `GET` | `/api/stats/overview` | Total / completed / failed calls, interested leads, follow-ups, average duration |
 | `POST` | `/voice` · `/call-status` · `/transfer-status` · `/transfer-whisper` | Twilio webhooks (signature-validated) |
 | `WS` | `/stream` | Twilio Media Stream ↔ agent |

@@ -26,6 +26,19 @@ import type {
 } from "@/types/api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+/**
+ * Where Server Components reach the backend. Defaults to the public URL; in
+ * Docker the frontend container sets API_INTERNAL_URL=http://backend:8000,
+ * since "localhost" there is the frontend container itself. Read at request
+ * time on the server only (it's not a NEXT_PUBLIC_ variable, so it never
+ * reaches the browser bundle).
+ */
+function baseUrl(): string {
+  if (typeof window === "undefined" && process.env.API_INTERNAL_URL) {
+    return process.env.API_INTERNAL_URL;
+  }
+  return API_BASE_URL;
+}
 /** WebSocket origin of the same backend (http→ws, https→wss), no trailing slash. */
 export const API_WS_BASE_URL = API_BASE_URL.replace(/^http/, "ws").replace(/\/+$/, "");
 
@@ -50,7 +63,7 @@ async function request<T>(
   options: RequestOptions,
   cookieHeader?: string,
 ): Promise<T> {
-  const url = new URL(path, API_BASE_URL);
+  const url = new URL(path, baseUrl());
   if (options.searchParams) {
     for (const [key, value] of Object.entries(options.searchParams)) {
       if (value !== undefined) url.searchParams.set(key, String(value));

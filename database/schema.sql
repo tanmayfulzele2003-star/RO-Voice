@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict TDvMjQdAvPgo9kgYT7tGvQE4jJJfaKpapUrDS3qU2XmST78PqePRYHKKAyfVqSa
+\restrict nJCf0XWt8wsUXi61H7BKbmfH3TUADYcrky1dsfYoSZOsCt52hw0VRBmDA0lyHBi
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -40,6 +40,18 @@ CREATE TABLE public.admin_users (
 
 CREATE TABLE public.alembic_version (
     version_num character varying(32) NOT NULL
+);
+
+
+--
+-- Name: app_settings; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.app_settings (
+    key text NOT NULL,
+    value text NOT NULL,
+    is_secret boolean DEFAULT false NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -245,6 +257,14 @@ ALTER TABLE ONLY public.admin_users
 
 ALTER TABLE ONLY public.alembic_version
     ADD CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num);
+
+
+--
+-- Name: app_settings app_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.app_settings
+    ADD CONSTRAINT app_settings_pkey PRIMARY KEY (key);
 
 
 --
@@ -581,5 +601,5 @@ ALTER TABLE ONLY public.requirements
 -- PostgreSQL database dump complete
 --
 
-\unrestrict TDvMjQdAvPgo9kgYT7tGvQE4jJJfaKpapUrDS3qU2XmST78PqePRYHKKAyfVqSa
+\unrestrict nJCf0XWt8wsUXi61H7BKbmfH3TUADYcrky1dsfYoSZOsCt52hw0VRBmDA0lyHBi
 

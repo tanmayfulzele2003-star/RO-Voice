@@ -1,0 +1,86 @@
+# One-command install: ./install.sh (writes .env, then runs this).
+#
+#   Local:  docker compose up -d --build
+#           dashboard http://localhost:3000 · API http://localhost:8000
+#   HTTPS:  set DOMAIN, PUBLIC_URL, DASHBOARD_URL and API_URL in .env to your
+#           domain, then: docker compose --profile https up -d --build
+#
+# Twilio and Gemini credentials can be left out here and entered in the
+# dashboard's setup checklist instead.
+name: ai-calling-agent
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: calling
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run ./install.sh, or set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: calling_agent
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calling -d calling_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://calling:${POSTGRES_PASSWORD}@db:5432/calling_agent
+      SESSION_SECRET: ${SESSION_SECRET:?Run ./install.sh, or set SESSION_SECRET in .env}
+      # Where Twilio reaches the API. Local installs need a tunnel (ngrok) for
+      # real phone calls; browser calls work without one.
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8000}
+      FRONTEND_ORIGIN: ${DASHBOARD_URL:-http://localhost:3000}
+      # Optional: unattended first admin (otherwise use the /setup link in the logs).
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Optional here — can be entered in the dashboard instead.
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      MAX_CONCURRENT_CALLS: ${MAX_CONCURRENT_CALLS:-5}
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:8000:8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_SITE_URL: ${DASHBOARD_URL:-http://localhost:3000}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      API_INTERNAL_URL: http://backend:8000
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:3000:3000"
+
+  caddy:
+    profiles: ["https"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  db-data:
+  caddy-data:
