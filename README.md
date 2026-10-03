@@ -90,8 +90,25 @@ domain, and the public URL is already set. Other useful commands are `docker com
 `docker compose down` (data stays in the `db-data` volume), and `git pull && ./install.sh` to upgrade.
 Migrations run on every start.
 
-For unattended installs, put `ADMIN_USERNAME` and `ADMIN_PASSWORD` in `.env` to create the admin
-without the link.
+For unattended installs, put `ADMIN_USERNAME`, `ADMIN_PASSWORD` and `COMPANY_NAME` in `.env` to
+create the admin (platform admin and owner of that company) without the link.
+
+## Selling it to other businesses
+
+One installation can serve many companies, each completely separate.
+
+1. **You** run `./install.sh` and become the **platform admin** of your own company.
+2. **Companies → Add a company** creates an empty company and gives you a one-time link for its
+   owner. You can set a limit on how many calls it may run at once.
+3. **The customer's owner** opens the link, picks a username and password, and goes through the
+   same Get started checklist. They connect their own Twilio account, or use yours, and set up
+   their business, numbers and team. They never see another company's data.
+4. **They invite their staff** under **Team** with roles: *viewer* (see results), *member* (add
+   customers, call, run campaigns), *admin* (also profiles, numbers, settings, team) and
+   *owner*.
+5. **Platform settings** (the Gemini key, the public URL, and the fallback Twilio account) are
+   shared and only you can change them. Suspend a company under **Companies**, and its users are
+   signed out immediately.
 
 ## Setup instructions (without Docker)
 
@@ -143,7 +160,7 @@ No secrets are committed. `.env` files are git-ignored.
 createdb calling_agent                 # or create one on Neon / Render
 cd backend
 python -m alembic upgrade head         # creates tables + seeds the default RO business profile
-python scripts/create_admin.py admin <password>
+python scripts/create_admin.py admin <password> "Your company"
 ```
 
 ### 5. Run FastAPI
@@ -395,8 +412,17 @@ need the admin session cookie.
 | `GET` / `POST` | `/api/campaigns` | List / create campaigns (`name, customer_ids, profile_id, max_concurrent, max_attempts, retry_delay_minutes`) |
 | `GET` / `DELETE` | `/api/campaigns/{id}` | Campaign with per-contact progress / delete a finished campaign |
 | `POST` | `/api/campaigns/{id}/start` · `/pause` · `/cancel` | Control the dialer for a campaign |
-| `GET` / `PATCH` | `/api/settings` | Twilio credentials, caller number, Gemini key, public URL (secrets masked on read, encrypted at rest) |
-| `POST` | `/api/settings/test-twilio` · `/test-gemini` · `/test-public-url` | Check each connection; the Twilio test lists the account's numbers |
+| `GET` / `PATCH` | `/api/settings` | The company's own Twilio account and caller number (admins; secrets masked on read, encrypted at rest) |
+| `POST` | `/api/settings/test-twilio` | Check the company's Twilio account and list its numbers |
+| `GET` / `PATCH` | `/api/platform/settings` | Platform-wide: Gemini key, public URL, fallback Twilio account (platform admin) |
+| `POST` | `/api/platform/settings/test-twilio` · `/test-gemini` · `/test-public-url` | Check each platform connection |
+| `GET` / `PATCH` | `/api/organization` | Your company (owners rename it) |
+| `GET` · `PATCH` / `DELETE` | `/api/users` · `/api/users/{id}` | Your team: change role, disable, remove (admins) |
+| `GET` / `POST` / `DELETE` | `/api/invites` · `/api/invites/{id}` | Single-use invite links (admins); the token is returned once |
+| `GET` / `POST` | `/api/join/{token}` | See and accept an invite (public) |
+| `POST` | `/api/auth/password` | Change your password |
+| `GET` / `POST` · `PATCH` | `/api/platform/organizations` · `/{id}` | Companies on this installation: add (returns an owner link), suspend, call limit (platform admin) |
+| `POST` | `/api/platform/organizations/{id}/invites` | A new owner link for a company |
 | `GET` / `POST` | `/api/setup/status` · `/api/setup/admin` | First run: whether an admin exists; create it with the one-time setup token (public) |
 | `GET` | `/api/setup/checklist` | Setup progress |
 | `GET` | `/api/profiles/templates` | Industry starting points for a business profile |
@@ -404,7 +430,6 @@ need the admin session cookie.
 | `POST` | `/voice` · `/call-status` · `/transfer-status` · `/transfer-whisper` | Twilio webhooks (signature-validated) |
 | `WS` | `/stream` | Twilio Media Stream ↔ agent |
 | `WS` | `/browser-stream?call_id&token` | Browser microphone ↔ agent |
-| `POST` | `/call` | Legacy manual-test endpoint (unauthenticated; don't expose publicly) |
 | `GET` | `/health` | Health check |
 
 Example:
@@ -434,7 +459,9 @@ Alembic migrations in `backend/alembic/versions/` are the source of truth.
 | `call_events` | Event log: provider errors, silences, interruptions, fields collected, AI errors, … |
 | `requirements` | Collected fields (`fields` JSONB keyed by the profile's field keys, plus fixed RO columns) |
 | `call_summaries` | summary, intent, key requirements, important points, lead status, follow-up (+ notes), call outcome text |
-| `admin_users` | Dashboard login (bcrypt) |
+| `organizations` | Companies using the installation: name, active, per-company call limit |
+| `admin_users` | Dashboard login (bcrypt): company, role, platform admin, active |
+| `invites` | Single-use invite links (token hash, role, expiry, accepted) |
 
 The ER diagram is in [ARCHITECTURE.md](ARCHITECTURE.md#database).
 

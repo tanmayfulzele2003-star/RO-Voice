@@ -41,6 +41,7 @@ services:
       # Optional: unattended first admin (otherwise use the /setup link in the logs).
       ADMIN_USERNAME: ${ADMIN_USERNAME:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      COMPANY_NAME: ${COMPANY_NAME:-}
       # Optional here — can be entered in the dashboard instead.
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict nJCf0XWt8wsUXi61H7BKbmfH3TUADYcrky1dsfYoSZOsCt52hw0VRBmDA0lyHBi
+\restrict JRGCOSzQlu40yYExmG7dVzbOanOCZ3kPIxlMVo3IPW12jw1Im01RFxc3LMdILHy
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -30,7 +30,11 @@ CREATE TABLE public.admin_users (
     id uuid NOT NULL,
     username text NOT NULL,
     password_hash text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    org_id uuid NOT NULL,
+    role text NOT NULL,
+    is_platform_admin boolean DEFAULT false NOT NULL,
+    is_active boolean DEFAULT true NOT NULL
 );
 
 
@@ -51,7 +55,8 @@ CREATE TABLE public.app_settings (
     key text NOT NULL,
     value text NOT NULL,
     is_secret boolean DEFAULT false NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    scope text DEFAULT 'platform'::text NOT NULL
 );
 
 
@@ -72,7 +77,8 @@ CREATE TABLE public.business_profiles (
     fields jsonb NOT NULL,
     is_default boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    transfer_number text
+    transfer_number text,
+    org_id uuid NOT NULL
 );
 
 
@@ -130,7 +136,8 @@ CREATE TABLE public.calls (
     to_number text,
     phone_number_id uuid,
     campaign_id uuid,
-    transferred_to text
+    transferred_to text,
+    org_id uuid NOT NULL
 );
 
 
@@ -166,7 +173,8 @@ CREATE TABLE public.campaigns (
     retry_delay_minutes integer NOT NULL,
     started_at timestamp with time zone,
     completed_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    org_id uuid NOT NULL
 );
 
 
@@ -195,7 +203,38 @@ CREATE TABLE public.customers (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     purpose text,
     product text,
-    profile_id uuid
+    profile_id uuid,
+    org_id uuid NOT NULL
+);
+
+
+--
+-- Name: invites; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.invites (
+    id uuid NOT NULL,
+    org_id uuid NOT NULL,
+    role text NOT NULL,
+    token_hash text NOT NULL,
+    note text,
+    created_by uuid,
+    expires_at timestamp with time zone NOT NULL,
+    accepted_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: organizations; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.organizations (
+    id uuid NOT NULL,
+    name text NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    max_concurrent_calls integer,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -212,7 +251,8 @@ CREATE TABLE public.phone_numbers (
     outbound_enabled boolean DEFAULT true NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
     last_used_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    org_id uuid NOT NULL
 );
 
 
@@ -264,7 +304,7 @@ ALTER TABLE ONLY public.alembic_version
 --
 
 ALTER TABLE ONLY public.app_settings
-    ADD CONSTRAINT app_settings_pkey PRIMARY KEY (key);
+    ADD CONSTRAINT app_settings_pkey PRIMARY KEY (scope, key);
 
 
 --
@@ -348,6 +388,30 @@ ALTER TABLE ONLY public.customers
 
 
 --
+-- Name: invites invites_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invites
+    ADD CONSTRAINT invites_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: invites invites_token_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invites
+    ADD CONSTRAINT invites_token_hash_key UNIQUE (token_hash);
+
+
+--
+-- Name: organizations organizations_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.organizations
+    ADD CONSTRAINT organizations_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: phone_numbers phone_numbers_number_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -388,6 +452,20 @@ ALTER TABLE ONLY public.campaign_contacts
 
 
 --
+-- Name: ix_admin_users_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_admin_users_org_id ON public.admin_users USING btree (org_id);
+
+
+--
+-- Name: ix_business_profiles_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_business_profiles_org_id ON public.business_profiles USING btree (org_id);
+
+
+--
 -- Name: ix_call_events_call_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -406,6 +484,13 @@ CREATE INDEX ix_calls_campaign_id ON public.calls USING btree (campaign_id);
 --
 
 CREATE INDEX ix_calls_customer_id ON public.calls USING btree (customer_id);
+
+
+--
+-- Name: ix_calls_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_calls_org_id ON public.calls USING btree (org_id);
 
 
 --
@@ -451,6 +536,13 @@ CREATE INDEX ix_campaign_contacts_customer_id ON public.campaign_contacts USING 
 
 
 --
+-- Name: ix_campaigns_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_campaigns_org_id ON public.campaigns USING btree (org_id);
+
+
+--
 -- Name: ix_campaigns_status; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -465,10 +557,31 @@ CREATE INDEX ix_conversation_messages_call_id ON public.conversation_messages US
 
 
 --
+-- Name: ix_customers_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_customers_org_id ON public.customers USING btree (org_id);
+
+
+--
 -- Name: ix_customers_profile_id; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_customers_profile_id ON public.customers USING btree (profile_id);
+
+
+--
+-- Name: ix_invites_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_invites_org_id ON public.invites USING btree (org_id);
+
+
+--
+-- Name: ix_phone_numbers_org_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_phone_numbers_org_id ON public.phone_numbers USING btree (org_id);
 
 
 --
@@ -482,7 +595,23 @@ CREATE INDEX ix_phone_numbers_profile_id ON public.phone_numbers USING btree (pr
 -- Name: uq_business_profiles_one_default; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX uq_business_profiles_one_default ON public.business_profiles USING btree (is_default) WHERE is_default;
+CREATE UNIQUE INDEX uq_business_profiles_one_default ON public.business_profiles USING btree (org_id) WHERE is_default;
+
+
+--
+-- Name: admin_users admin_users_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.admin_users
+    ADD CONSTRAINT admin_users_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: business_profiles business_profiles_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.business_profiles
+    ADD CONSTRAINT business_profiles_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
 
 
 --
@@ -515,6 +644,14 @@ ALTER TABLE ONLY public.calls
 
 ALTER TABLE ONLY public.calls
     ADD CONSTRAINT calls_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id);
+
+
+--
+-- Name: calls calls_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.calls
+    ADD CONSTRAINT calls_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
 
 
 --
@@ -558,6 +695,14 @@ ALTER TABLE ONLY public.campaign_contacts
 
 
 --
+-- Name: campaigns campaigns_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaigns
+    ADD CONSTRAINT campaigns_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
 -- Name: campaigns campaigns_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -574,11 +719,43 @@ ALTER TABLE ONLY public.conversation_messages
 
 
 --
+-- Name: customers customers_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.customers
+    ADD CONSTRAINT customers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
 -- Name: customers customers_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.customers
     ADD CONSTRAINT customers_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.business_profiles(id) ON DELETE SET NULL;
+
+
+--
+-- Name: invites invites_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invites
+    ADD CONSTRAINT invites_created_by_fkey FOREIGN KEY (created_by) REFERENCES public.admin_users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: invites invites_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.invites
+    ADD CONSTRAINT invites_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: phone_numbers phone_numbers_org_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.phone_numbers
+    ADD CONSTRAINT phone_numbers_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.organizations(id) ON DELETE CASCADE;
 
 
 --
@@ -601,5 +778,5 @@ ALTER TABLE ONLY public.requirements
 -- PostgreSQL database dump complete
 --
 
-\unrestrict nJCf0XWt8wsUXi61H7BKbmfH3TUADYcrky1dsfYoSZOsCt52hw0VRBmDA0lyHBi
+\unrestrict JRGCOSzQlu40yYExmG7dVzbOanOCZ3kPIxlMVo3IPW12jw1Im01RFxc3LMdILHy
 

@@ -22,7 +22,7 @@ flowchart TB
         Agent["ADK agent + tools\n(agent.py, conversation.py)"]
         API["/api/* REST routes\nprofiles · customers · calls · stats · auth"]
         Post["Post-call analysis\n(summary_service.py)"]
-        Sec[require_admin +\nTwilio signature check +\nstream tokens + rate limiter]
+        Sec[require_user + roles\n(scoped to the user's company) +\nTwilio signature check +\nstream tokens + rate limiter]
     end
 
     Gemini[Gemini Live API\nnative audio: STT + LLM + TTS]
@@ -272,6 +272,52 @@ Twilio run out of TwiML and hang up.
   writes the summary, but it never overwrites the `transferred` or `callback` outcome. The AI
   part of the transcript is kept. The human part isn't recorded.
 
+## Multiple companies
+
+One installation serves several businesses. An **organization** owns everything a business
+works with: business profiles, customers, calls (and through them transcripts, events,
+requirements and summaries), phone numbers, campaigns, users, invites, its own Twilio account and
+its setup progress.
+
+* **Scoping:** every dashboard route depends on `require_user`. It resolves the session cookie to
+  a `UserContext` (user, `org_id`, role) with one query per request and passes `user.org_id` into
+  the service. Services filter every query by it. A row from another company is simply "not
+  found" (404), and ids from another company can't be used in writes either (422).
+  `tests/test_tenancy.py` tries every route against another company's rows.
+* **Roles** (`require_role`), from lowest to highest:
+
+  | Role | Can |
+  |---|---|
+  | `viewer` | See customers, calls, campaigns, results |
+  | `member` | Also add and edit customers, place calls, run campaigns |
+  | `admin` | Also manage business profiles, numbers, the company's settings and the team |
+  | `owner` | Everything, including other admins and owners; renames the company |
+
+  A company always keeps at least one active owner. Nobody can change their own role or remove
+  themselves.
+* **Platform admin** (`is_platform_admin`): the operator of the installation, the one who runs
+  `install.sh`. They create companies (each with a one-time owner link), suspend them, set
+  per-company call limits, and own the platform settings.
+* **Invites:** single-use links that expire after 7 days. Only a SHA-256 of the token is stored,
+  and accepting one locks the row, so a link can't be used twice. Joining creates the account
+  in that company with that role.
+* **Deactivation is immediate.** Disabling a user or suspending a company makes their next
+  request 401, because `require_user` re-reads them every time. The dashboard then clears the
+  cookie through `/session-expired`, so there's no redirect loop between `/` and `/login`.
+* **Telephony per company:** a company may save its own Twilio account
+  (`settings_service.twilio_for(org_id)`). Without one it uses the platform's. Outbound calls,
+  hang-ups, transfers and number syncing use the owning company's client. **Webhook signatures
+  are checked with the owning company's auth token:** the company is found from the call
+  (outbound and transfers, `/call-status`) or from the dialled number (inbound). Calls to a
+  number nobody registered go to the platform admin's company. A number belongs to exactly one
+  company platform-wide.
+* **Capacity:** `calls_service.free_lines(org_id)` returns the lower of the platform's free
+  lines (`MAX_CONCURRENT_CALLS`) and the company's own `max_concurrent_calls`. It's used by
+  manual calls, the dialer and inbound routing.
+* **Upgrading** from a single-company install: migration `f4a2d9c7e1b5` moves all existing data
+  into a "Default organization". Existing admins become its owners and platform admins, so
+  nothing changes for them.
+
 ## Installation and settings
 
 * **Docker:** `install.sh` writes `.env` (random `SESSION_SECRET` and database password) and
@@ -305,9 +351,11 @@ terminal, and refined by the agent's verdict and then the AI analysis (`services
 
 | Path | Guard | Why |
 |---|---|---|
-| `/voice`, `/call-status`, `/transfer-status`, `/transfer-whisper` | Twilio `X-Twilio-Signature` HMAC validation (`verify_twilio_signature`). On failure the backend logs the URL it validated against | Only Twilio, which holds `TWILIO_AUTH_TOKEN`, can produce a valid signature. This stops forged webhooks from creating fake calls or corrupting call status |
-| `/api/*` (except `/api/auth/login`) | `require_admin` FastAPI dependency: signed session cookie | Keeps the dashboard's data endpoints from being open to the internet |
-| `POST /api/calls`, `POST /api/calls/browser` | Same session guard + in-memory sliding-window rate limit (5 per 60 s per admin username). Phone calls are also capped by `MAX_CONCURRENT_CALLS` | Outbound calling is billable, and AI sessions cost quota |
+| `/voice`, `/call-status`, `/transfer-status`, `/transfer-whisper` | Twilio `X-Twilio-Signature` HMAC validation (`verify_twilio_signature`) with the auth token of the Twilio account of the company the call belongs to. On failure the backend logs the URL it validated against | Only Twilio, which holds that auth token, can produce a valid signature. This stops forged webhooks from creating fake calls or corrupting call status |
+| `/api/*` (except login, `/api/setup/status`, `/api/setup/admin`, `/api/join/*`) | `require_user`: signed session cookie resolved to an active user in an active company; `require_role(...)` / `require_platform_admin` on top. Every query is filtered by the user's company | Keeps each company's data private to it, and limits what each role can change |
+| `/api/setup/admin` | One-time setup token (HMAC of `SESSION_SECRET`) printed in the server log; works only while no user exists, under a table lock | Lets the installer create the first account without a shell |
+| `/api/join/{token}` | Single-use, expiring invite token (only its hash is stored) | Adds a person to exactly one company with exactly one role |
+| `POST /api/calls`, `POST /api/calls/browser` | Same session guard (member and up) + in-memory sliding-window rate limit (5 per 60 s per username). Phone calls are also capped by `free_lines` (platform and company limits) | Outbound calling is billable, and AI sessions cost quota |
 | Campaign dialer | Runs inside the server, no HTTP surface. Started and stopped through the session-guarded `/api/campaigns/*` routes | Bulk dialing is the most expensive action, so it only runs from campaigns an admin started |
 | `/browser-stream` (WebSocket) | HMAC token from `POST /api/calls/browser`, bound to one `call_id`, valid for 2 minutes. Only accepted while that call is still `queued` on the `browser` channel | Cookies can't be relied on cross-site for WebSockets; the token can't be reused or pointed at another call |
 | `/stream` (WebSocket) | None beyond `call_id` correlation | Twilio's Media Streams protocol has no signature scheme for WebSocket connections. The URL is only ever handed to Twilio via the signed `/voice` TwiML response |
@@ -315,12 +363,21 @@ terminal, and refined by the agent's verdict and then the AI analysis (`services
 
 ## Database
 
-Ten domain tables plus `app_settings`, `admin_users` and `alembic_version`. Full column list in
+Eleven domain tables plus `app_settings`, `admin_users`, `invites` and `alembic_version`. Every
+domain table except the call children and `campaign_contacts` carries `org_id`; those inherit it
+from their call or campaign. Full column list in
 [database/schema.sql](database/schema.sql). Migrations in `backend/alembic/versions/` are the
 source of truth.
 
 ```mermaid
 erDiagram
+    ORGANIZATIONS ||--o{ BUSINESS_PROFILES : owns
+    ORGANIZATIONS ||--o{ CUSTOMERS : owns
+    ORGANIZATIONS ||--o{ CALLS : owns
+    ORGANIZATIONS ||--o{ PHONE_NUMBERS : owns
+    ORGANIZATIONS ||--o{ CAMPAIGNS : owns
+    ORGANIZATIONS ||--o{ ADMIN_USERS : "has team"
+    ORGANIZATIONS ||--o{ INVITES : "invites to"
     BUSINESS_PROFILES ||--o{ CUSTOMERS : "configures agent for"
     BUSINESS_PROFILES ||--o{ CALLS : "ran with"
     CUSTOMERS ||--o{ CALLS : receives
@@ -438,6 +495,28 @@ erDiagram
         text last_outcome
         timestamptz next_attempt_at
     }
+    ORGANIZATIONS {
+        uuid id PK
+        text name
+        boolean is_active "suspended companies are locked out"
+        int max_concurrent_calls "plan limit, null = platform limit"
+    }
+    ADMIN_USERS {
+        uuid id PK
+        uuid org_id FK
+        text username UK
+        text role "viewer | member | admin | owner"
+        boolean is_platform_admin
+        boolean is_active
+    }
+    INVITES {
+        uuid id PK
+        uuid org_id FK
+        text role
+        text token_hash UK "sha256; the link is shown once"
+        timestamptz expires_at
+        timestamptz accepted_at "single use"
+    }
     CALL_SUMMARIES {
         uuid id PK
         uuid call_id FK "unique — 1:1"
@@ -487,16 +566,19 @@ frontend/public/audio/pcm-capture-worklet.js  # mic → PCM-16 16 kHz
 
 ## Known limitations
 
-- **Single admin role.** `admin_users` supports several rows, but there's no self-registration
-  or role model. An operator creates users with `scripts/create_admin.py`.
+- **One company per user.** A person who works for two companies needs two accounts. There's
+  no self-service sign-up either: companies are added by the platform admin, and people join by
+  invite.
+- **No per-company data export or deletion yet.** Removing a company means deleting its
+  organization row, which cascades, after its calls' child rows are deleted (see
+  `tests/dbhelpers.py`).
 - **In-process state.** The rate limiter, ADK `InMemorySessionService` and the
   analysis-scheduled guard live in one process. (The campaign dialer is already safe to run
   in several processes: it claims contacts with `SKIP LOCKED`.) Scaling out needs sticky WebSocket routing and a
   shared store (Redis) for the rate limiter.
-- **No session revocation.** Session tokens are stateless signed `username:expiry` pairs.
-  Revoking one early means rotating `SESSION_SECRET`.
-- **`POST /call` is intentionally unauthenticated.** It was kept from upstream for manual curl
-  testing. Don't expose it publicly; the dashboard only uses `/api/calls`.
+- **Sessions are revoked per user, not per device.** Session tokens are signed
+  `username:expiry` pairs. Disabling the user ends all of their sessions at once. Ending only one
+  device's session would need a session table.
 - **Twilio `/stream` has no per-connection auth** (see the guards table).
 - **No Live-session resumption.** If Gemini drops a session mid-call, the customer hears an
   apology and the call ends as `ai_error`, rather than reconnecting transparently.

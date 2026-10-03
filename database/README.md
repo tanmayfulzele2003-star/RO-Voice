@@ -14,8 +14,8 @@ cd backend
 python -m alembic upgrade head
 ```
 
-12 tables: `business_profiles`, `customers`, `calls`, `conversation_messages`, `call_events`,
-`requirements`, `call_summaries`, `phone_numbers`, `campaigns`, `campaign_contacts`, `app_settings`, `admin_users` (plus Alembic's own `alembic_version` bookkeeping
+14 tables: `organizations`, `business_profiles`, `customers`, `calls`, `conversation_messages`, `call_events`,
+`requirements`, `call_summaries`, `phone_numbers`, `campaigns`, `campaign_contacts`, `app_settings`, `admin_users`, `invites` (plus Alembic's own `alembic_version` bookkeeping
 table). The first migration that introduces `business_profiles` seeds the default RO profile and
 backfills existing calls. See [../ARCHITECTURE.md](../ARCHITECTURE.md#database) for the ER diagram
 and relationships.
