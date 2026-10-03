@@ -280,12 +280,11 @@ async def test_cancel_drops_pending_contacts(db):
 
 
 async def test_failed_dial_is_linked_for_retry(db, monkeypatch):
-    """A Twilio rejection still creates a (failed) call row; the contact keeps
-    it so reconcile can decide on a retry."""
+    """A rejection specific to one number still creates a (failed) call row;
+    the contact keeps it so reconcile can decide on a retry."""
     monkeypatch.setattr(config, "MAX_CONCURRENT_CALLS", 1000)
     monkeypatch.setattr(config, "DIAL_CALLS_PER_SECOND", 0)
-    monkeypatch.setattr(config, "TWILIO_ACCOUNT_SID", "")  # start_outbound_call fails early
-    customer = await _customer(db)
+    customer = await _customer(db, phone="12345")  # not E.164: fails for this customer only
     campaign = await campaigns_service.create_campaign(
         {"name": "Test", "max_concurrent": 1, "max_attempts": 2, "retry_delay_minutes": 1},
         [customer.id],
@@ -299,3 +298,27 @@ async def test_failed_dial_is_linked_for_retry(db, monkeypatch):
     async with db_session.get_session_factory()() as session:
         call = await session.get(Call, contacts[0].last_call_id)
         assert call.status == "failed" and call.campaign_id == campaign.id
+
+
+async def test_config_error_pauses_campaign_without_spending_attempts(db, monkeypatch):
+    monkeypatch.setattr(config, "MAX_CONCURRENT_CALLS", 1000)
+    monkeypatch.setattr(config, "DIAL_CALLS_PER_SECOND", 0)
+    monkeypatch.setattr(config, "TWILIO_ACCOUNT_SID", "")  # every call would fail
+    customers = [await _customer(db) for _ in range(3)]
+    campaign = await campaigns_service.create_campaign(
+        {"name": "Test", "max_concurrent": 3, "max_attempts": 2, "retry_delay_minutes": 1},
+        [c.id for c in customers],
+    )
+    db["campaigns"].append(campaign.id)
+    await campaigns_service.set_campaign_status(campaign.id, "start")
+    assert await dialer.tick() == 0  # stops at the first config failure, nothing placed
+
+    found, counts, contacts = await campaigns_service.get_campaign_detail(campaign.id)
+    assert found.status == "paused" and "not configured" in found.status_reason
+    assert counts == {"pending": 3}
+    assert all(c.attempts == 0 for c in contacts)
+    assert sum(1 for c in contacts if c.last_call_id) == 1  # the failed call is still linked
+
+    await campaigns_service.set_campaign_status(campaign.id, "start")  # after fixing config
+    found, _, _ = await campaigns_service.get_campaign_detail(campaign.id)
+    assert found.status == "running" and found.status_reason is None

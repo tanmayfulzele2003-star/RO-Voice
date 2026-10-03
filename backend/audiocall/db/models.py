@@ -136,6 +136,8 @@ class Campaign(Base):
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default="draft", server_default="draft", index=True
     )  # draft|running|paused|completed|cancelled
+    # Why the dialer paused it on its own (e.g. Twilio credentials rejected).
+    status_reason: Mapped[str | None] = mapped_column(Text)
     max_concurrent: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     retry_delay_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=30)

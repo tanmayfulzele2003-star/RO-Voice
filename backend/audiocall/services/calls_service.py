@@ -44,6 +44,9 @@ _TWILIO_STATUS_MAP = {
     "canceled": "failed",
 }
 
+# Twilio errors caused by our setup rather than the number being called.
+_CONFIG_ERROR_CODES = {20003, 21210, 21212}
+
 _TERMINAL_STATUSES = {"completed", "failed", "no_answer", "disconnected"}
 TERMINAL_STATUSES = frozenset(_TERMINAL_STATUSES)
 _ACTIVE_STATUSES = ("queued", "ringing", "in_progress")
@@ -71,11 +74,16 @@ class CustomerNotFound(Exception):
 
 class TwilioCallFailed(Exception):
     """Raised when Twilio rejects/fails an outbound call creation request.
-    `call_id` is the (now failed) call row, so callers can link to it."""
+    `call_id` is the (now failed) call row, so callers can link to it.
+    `config_error` means every call would fail the same way (credentials,
+    host, caller ID), not just this customer's — the dialer pauses on it."""
 
-    def __init__(self, reason: str, call_id: uuid.UUID | None = None) -> None:
+    def __init__(
+        self, reason: str, call_id: uuid.UUID | None = None, config_error: bool = False
+    ) -> None:
         super().__init__(reason)
         self.call_id = call_id
+        self.config_error = config_error
 
 
 def map_twilio_status(twilio_status: str) -> str:
@@ -360,11 +368,11 @@ async def start_outbound_call(
         campaign_id=campaign_id,
     )
 
-    async def fail(event_type: str, reason: str) -> TwilioCallFailed:
+    async def fail(event_type: str, reason: str, config_error: bool = False) -> TwilioCallFailed:
         logger.error("Outbound call %s failed: %s", call.id, reason)
         await events_service.record(call.id, event_type, reason)
         await set_status(call.id, "failed", error_reason=reason)
-        return TwilioCallFailed(reason, call.id)
+        return TwilioCallFailed(reason, call.id, config_error)
 
     if not is_valid_e164(customer.phone):
         raise await fail(
@@ -376,12 +384,14 @@ async def start_outbound_call(
             "provider_error",
             "Twilio is not configured (TWILIO_* env vars are empty). Use 'Browser call' "
             "to demo the agent without a telephony provider.",
+            config_error=True,
         )
     if config.SERVER_HOST.startswith(("localhost", "127.0.0.1", "0.0.0.0")):
         raise await fail(
             "provider_error",
             f"SERVER_HOST is '{config.SERVER_HOST}', which Twilio can't reach. Set it to your "
             "public tunnel/deploy host (e.g. abc123.ngrok-free.app).",
+            config_error=True,
         )
 
     picked = await numbers_service.pick_outbound_number(profile.id)
@@ -390,6 +400,7 @@ async def start_outbound_call(
             "provider_error",
             "No caller number available: add an outbound-enabled number under Phone numbers, "
             "or set TWILIO_PHONE_NUMBER.",
+            config_error=True,
         )
     from_number, phone_number_id = picked
     await _set_caller(call.id, from_number, phone_number_id)
@@ -409,9 +420,9 @@ async def start_outbound_call(
         )
     except TwilioRestException as exc:
         event_type, reason = describe_twilio_error(exc)
-        raise await fail(event_type, reason) from exc
+        raise await fail(event_type, reason, exc.code in _CONFIG_ERROR_CODES) from exc
     except Exception as exc:  # network errors etc.
-        raise await fail("provider_error", f"Could not reach Twilio: {exc}") from exc
+        raise await fail("provider_error", f"Could not reach Twilio: {exc}", True) from exc
 
     await set_twilio_sid(call.id, twilio_call.sid)
     call.twilio_call_sid = twilio_call.sid

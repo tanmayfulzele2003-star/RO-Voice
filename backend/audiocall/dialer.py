@@ -8,6 +8,10 @@ Runs as a background task in the FastAPI lifespan. Every tick it
      respect Twilio's calls-per-second limit;
   3. marks campaigns with nothing left to dial as completed.
 
+A failure that every call would hit (bad credentials, unreachable host, no
+caller ID) pauses the campaign with a reason instead of spending each
+customer's attempts on it.
+
 The calls themselves run in parallel without extra work: each Twilio media
 stream is its own WebSocket, CallBridge and Gemini Live session.
 """
@@ -35,7 +39,7 @@ async def tick() -> int:
         if global_free <= 0:
             break
         contacts = await campaigns_service.claim_contacts(campaign, global_free)
-        for contact in contacts:
+        for index, contact in enumerate(contacts):
             if placed:
                 await asyncio.sleep(spacing)
             try:
@@ -44,6 +48,17 @@ async def tick() -> int:
                 )
                 await campaigns_service.attach_call(contact.id, call.id)
             except calls_service.TwilioCallFailed as exc:
+                if exc.config_error:
+                    # Every remaining call would fail too: stop, don't spend attempts.
+                    logger.warning("Pausing campaign %s: %s", campaign.id, exc)
+                    await campaigns_service.pause_for_config_error(
+                        campaign.id,
+                        str(exc),
+                        [c.id for c in contacts[index:]],
+                        contact.id,
+                        exc.call_id,
+                    )
+                    break
                 # The failed call row is linked; reconcile decides on a retry.
                 await campaigns_service.attach_call(contact.id, exc.call_id, failed=True)
             except calls_service.CustomerNotFound:

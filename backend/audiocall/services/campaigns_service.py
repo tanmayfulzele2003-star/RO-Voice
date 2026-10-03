@@ -136,6 +136,7 @@ async def set_campaign_status(campaign_id: uuid.UUID, action: str) -> Campaign:
         if campaign.status not in allowed[action]:
             raise InvalidTransition(f"Can't {action} a {campaign.status} campaign")
         now = datetime.now(timezone.utc)
+        campaign.status_reason = None
         if action == "start":
             campaign.status = "running"
             campaign.started_at = campaign.started_at or now
@@ -281,6 +282,38 @@ async def attach_call(contact_id: uuid.UUID, call_id: uuid.UUID | None, failed: 
         if failed and call_id is None:
             contact.status = "failed"
             contact.last_outcome = "failed"
+        await session.commit()
+
+
+async def pause_for_config_error(
+    campaign_id: uuid.UUID,
+    reason: str,
+    contact_ids: list[uuid.UUID],
+    failed_contact_id: uuid.UUID,
+    call_id: uuid.UUID | None,
+) -> None:
+    """Every call would fail the same way (credentials, host, caller ID):
+    pause instead of burning each customer's attempts, and hand the claimed
+    contacts' attempts back. Resuming after the fix re-dials them."""
+    async with get_session_factory()() as session:
+        campaign = await session.get(Campaign, campaign_id, with_for_update=True)
+        if campaign is not None and campaign.status == "running":
+            campaign.status = "paused"
+            campaign.status_reason = reason
+        contacts = (
+            await session.execute(
+                select(CampaignContact).where(
+                    CampaignContact.id.in_(contact_ids), CampaignContact.status == "dialing"
+                )
+            )
+        ).scalars()
+        for contact in contacts:
+            contact.status = "pending"
+            contact.attempts = max(0, contact.attempts - 1)
+            contact.next_attempt_at = None
+            if contact.id == failed_contact_id:
+                contact.last_call_id = call_id
+                contact.last_outcome = "failed"
         await session.commit()
 
 

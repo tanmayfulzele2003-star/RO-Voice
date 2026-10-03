@@ -223,6 +223,11 @@ Every `DIALER_INTERVAL_SECONDS` it does three things:
    with dials spaced `1 / DIAL_CALLS_PER_SECOND` apart to stay under Twilio's CPS limit.
 3. **Completes** running campaigns that have no `pending` or `dialing` contacts left.
 
+A failure every call would hit (Twilio not configured or credentials rejected, an unreachable
+`SERVER_HOST`, no caller number, Twilio unreachable) is flagged `config_error`. The dialer then
+**pauses the campaign** with a `status_reason` and gives back the claimed contacts' attempts,
+instead of spending every customer's retries on a setup problem. Resuming clears the reason.
+
 Pausing stops new dials but lets live calls finish. Cancelling also marks the pending contacts
 `cancelled`. Manual `POST /api/calls` respects the same global `MAX_CONCURRENT_CALLS` and returns
 429 when every line is busy.
@@ -394,6 +399,7 @@ erDiagram
         text name
         uuid profile_id FK "null = each customer's profile"
         text status "draft | running | paused | completed | cancelled"
+        text status_reason "why the dialer auto-paused"
         int max_concurrent
         int max_attempts
         int retry_delay_minutes

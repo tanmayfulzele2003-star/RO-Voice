@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict FLLsxbOXXQwLijUEP1X9mXYFpM8TU2Unf5E2GdT4CU0zcMe1resf9AaEq6fKIBH
+\restrict TDvMjQdAvPgo9kgYT7tGvQE4jJJfaKpapUrDS3qU2XmST78PqePRYHKKAyfVqSa
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -148,6 +148,7 @@ CREATE TABLE public.campaigns (
     name text NOT NULL,
     profile_id uuid,
     status text DEFAULT 'draft'::text NOT NULL,
+    status_reason text,
     max_concurrent integer NOT NULL,
     max_attempts integer NOT NULL,
     retry_delay_minutes integer NOT NULL,
@@ -580,5 +581,5 @@ ALTER TABLE ONLY public.requirements
 -- PostgreSQL database dump complete
 --
 
-\unrestrict FLLsxbOXXQwLijUEP1X9mXYFpM8TU2Unf5E2GdT4CU0zcMe1resf9AaEq6fKIBH
+\unrestrict TDvMjQdAvPgo9kgYT7tGvQE4jJJfaKpapUrDS3qU2XmST78PqePRYHKKAyfVqSa
 

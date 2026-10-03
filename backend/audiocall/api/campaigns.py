@@ -37,6 +37,7 @@ def _out(campaign, counts: dict[str, int]) -> CampaignOut:  # noqa: ANN001
         name=campaign.name,
         profile_id=campaign.profile_id,
         status=campaign.status,
+        status_reason=campaign.status_reason,
         max_concurrent=campaign.max_concurrent,
         max_attempts=campaign.max_attempts,
         retry_delay_minutes=campaign.retry_delay_minutes,

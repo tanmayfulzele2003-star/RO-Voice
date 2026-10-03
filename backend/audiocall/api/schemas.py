@@ -339,6 +339,7 @@ class CampaignOut(BaseModel):
     name: str
     profile_id: uuid.UUID | None
     status: str
+    status_reason: str | None
     max_concurrent: int
     max_attempts: int
     retry_delay_minutes: int

@@ -59,6 +59,7 @@ def upgrade() -> None:
             sa.ForeignKey("business_profiles.id", ondelete="SET NULL"),
         ),
         sa.Column("status", sa.Text(), nullable=False, server_default="draft"),
+        sa.Column("status_reason", sa.Text()),
         sa.Column("max_concurrent", sa.Integer(), nullable=False),
         sa.Column("max_attempts", sa.Integer(), nullable=False),
         sa.Column("retry_delay_minutes", sa.Integer(), nullable=False),
