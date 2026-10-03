@@ -336,6 +336,21 @@ class CallSummary(Base):
     call: Mapped["Call"] = relationship(back_populates="summary")
 
 
+class AppSetting(Base):
+    """A setting saved from the dashboard (Twilio credentials, Gemini key,
+    public URL). Overrides the environment; secrets are stored encrypted.
+    See services/settings_service.py."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    is_secret: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class AdminUser(Base):
     __tablename__ = "admin_users"
 

@@ -49,22 +49,26 @@ from pydantic import BaseModel  # noqa: E402
 
 from audiocall import dialer  # noqa: E402
 from audiocall.api import api_router  # noqa: E402
+from audiocall.core import config  # noqa: E402
 from audiocall.core.config import (  # noqa: E402
     FRONTEND_ORIGIN,
-    HTTP_SCHEME,
     MAX_CONCURRENT_CALLS,
-    SERVER_HOST,
     TRANSFER_RING_TIMEOUT_SECONDS,
     TWILIO_VALIDATE_SIGNATURE,
-    WS_SCHEME,
 )
-from audiocall.core.security import verify_stream_token, verify_twilio_signature  # noqa: E402
+from audiocall.core.security import (  # noqa: E402
+    deployment_id,
+    setup_token,
+    verify_stream_token,
+    verify_twilio_signature,
+)
 from audiocall.db.session import check_connectivity  # noqa: E402
 from audiocall.services import (  # noqa: E402
     calls_service,
     events_service,
     numbers_service,
     profiles_service,
+    settings_service,
     telephony,
 )
 from audiocall.voice.bridge import CallBridge  # noqa: E402
@@ -95,11 +99,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # rather than surfacing a confusing error on the first request that needs it.
     await check_connectivity()
     logger.info("Database connectivity verified")
+    await settings_service.load()
+    await _announce_first_run()
+    refresher = settings_service.start_refresher()
     dialer_task = dialer.start()
     try:
         yield
     finally:
         await dialer.stop(dialer_task)
+        await settings_service.stop_refresher(refresher)
+
+
+async def _announce_first_run() -> None:
+    """No admin yet: print the one-time link that creates the first one."""
+    from audiocall.api.setup import admin_count
+
+    if await admin_count() == 0:
+        logger.warning(
+            "No admin account yet. Finish setup at: %s/setup?token=%s",
+            FRONTEND_ORIGIN.rstrip("/"),
+            setup_token(),
+        )
 
 
 app = FastAPI(title="Twilio + Google ADK Voice Agent", lifespan=lifespan)
@@ -126,7 +146,7 @@ async def security_headers(request: Request, call_next):  # noqa: ANN001
     # would break them, so only apply it to the actual JSON API surface.
     if request.url.path not in _DOCS_PATHS:
         response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-    if HTTP_SCHEME == "https":
+    if config.HTTP_SCHEME == "https":
         response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
     return response
 
@@ -145,7 +165,7 @@ def _verify_twilio_webhook(request: Request, form: dict) -> None:
     if not TWILIO_VALIDATE_SIGNATURE:
         return
     signature = request.headers.get("X-Twilio-Signature", "")
-    url = f"{HTTP_SCHEME}://{SERVER_HOST}{request.url.path}"
+    url = f"{config.public_url()}{request.url.path}"
     if request.url.query:
         url += f"?{request.url.query}"
     if not verify_twilio_signature(url, form, signature):
@@ -163,7 +183,9 @@ def _verify_twilio_webhook(request: Request, form: dict) -> None:
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    # `deployment` lets the dashboard's public-URL check confirm it reached
+    # this server; it's a non-secret fingerprint (see core/security.py).
+    return {"status": "ok", "deployment": deployment_id()}
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +259,7 @@ async def voice_webhook(request: Request) -> Response:
             return Response(content=twiml_or_call_id, media_type="application/xml")
         call_id = twiml_or_call_id
 
-    stream_url = f"{WS_SCHEME}://{SERVER_HOST}/stream?call_id={call_id}"
+    stream_url = f"{config.WS_SCHEME}://{config.SERVER_HOST}/stream?call_id={call_id}"
     logger.info("Twilio voice webhook hit; directing stream to %s", stream_url)
     return Response(
         content=telephony.stream_twiml(stream_url, call_id), media_type="application/xml"
@@ -291,7 +313,7 @@ async def _route_inbound_call(form, twilio_call_sid: str) -> uuid.UUID | str:  #
                 profile.transfer_number,
                 caller_id=to_number or None,
                 timeout_seconds=TRANSFER_RING_TIMEOUT_SECONDS,
-                action_url=f"{HTTP_SCHEME}://{SERVER_HOST}/transfer-status?call_id={call.id}",
+                action_url=f"{config.public_url()}/transfer-status?call_id={call.id}",
                 announcement="Please hold while we connect you to our team.",
             )
         await events_service.record(call.id, "capacity_busy", f"all {MAX_CONCURRENT_CALLS} lines busy")

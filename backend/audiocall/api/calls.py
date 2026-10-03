@@ -25,9 +25,8 @@ from audiocall.core.config import (
     CALL_RATE_LIMIT_MAX,
     CALL_RATE_LIMIT_WINDOW_SECONDS,
     MAX_CONCURRENT_CALLS,
-    SERVER_HOST,
-    WS_SCHEME,
 )
+from audiocall.core import config
 from audiocall.core.rate_limit import check_rate_limit
 from audiocall.core.security import create_stream_token
 from audiocall.services import calls_service
@@ -85,7 +84,7 @@ async def start_browser_call(
     return BrowserCallStartResponse(
         call_id=call.id,
         token=token,
-        stream_url=f"{WS_SCHEME}://{SERVER_HOST}/browser-stream?call_id={call.id}&token={token}",
+        stream_url=f"{config.WS_SCHEME}://{config.SERVER_HOST}/browser-stream?call_id={call.id}&token={token}",
     )
 
 

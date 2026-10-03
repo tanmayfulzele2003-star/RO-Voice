@@ -34,22 +34,25 @@ async def require_admin(request: Request) -> str:
     return username
 
 
-@router.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest, response: Response) -> LoginResponse:
-    admin = await auth_service.get_admin_by_username(payload.username)
-    if admin is None or not verify_password(payload.password, admin.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-
-    token = create_session_token(admin.username)
+def set_session_cookie(response: Response, username: str) -> None:
     response.set_cookie(
         key=config.SESSION_COOKIE_NAME,
-        value=token,
+        value=create_session_token(username),
         httponly=True,
         secure=config.USE_TLS,
         samesite="lax",
         max_age=config.SESSION_TTL_SECONDS,
         path="/",
     )
+
+
+@router.post("/login", response_model=LoginResponse)
+async def login(payload: LoginRequest, response: Response) -> LoginResponse:
+    admin = await auth_service.get_admin_by_username(payload.username)
+    if admin is None or not verify_password(payload.password, admin.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    set_session_cookie(response, admin.username)
     return LoginResponse(username=admin.username)
 
 

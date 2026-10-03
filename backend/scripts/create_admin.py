@@ -3,8 +3,10 @@
 Usage:
     python scripts/create_admin.py <username> <password>
 
-There is no self-registration flow by design — a single admin user, created
-out-of-band by whoever operates the deployment.
+There is no self-registration flow by design. The first admin can also be
+created from the dashboard's /setup page with the one-time link the server
+prints at startup while no admin exists; this script stays for scripted
+installs and for adding more admins.
 """
 
 from __future__ import annotations

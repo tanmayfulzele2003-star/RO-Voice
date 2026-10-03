@@ -450,7 +450,7 @@ class CallBridge:
         number = (self.state.get("profile") or {}).get("transfer_number")
         if not number or self.call_id is None:
             return
-        base = f"{config.HTTP_SCHEME}://{config.SERVER_HOST}"
+        base = config.public_url()
         twiml = telephony.dial_twiml(
             number,
             caller_id=telephony.business_number(

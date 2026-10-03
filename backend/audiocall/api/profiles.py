@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from audiocall.api.auth import require_admin
 from audiocall.api.schemas import ProfileCreate, ProfileOut, ProfileUpdate
 from audiocall.services import profiles_service
+from audiocall.templates import TEMPLATES
 
 router = APIRouter(
     prefix="/api/profiles", tags=["business profiles"], dependencies=[Depends(require_admin)]
@@ -26,6 +27,12 @@ async def list_profiles() -> list[ProfileOut]:
     if not profiles:
         profiles = [await profiles_service.get_default_profile()]
     return [ProfileOut.model_validate(p) for p in profiles]
+
+
+@router.get("/templates")
+async def list_templates() -> list[dict]:
+    """Industry starting points for a new profile (see audiocall/templates.py)."""
+    return TEMPLATES
 
 
 @router.post("", response_model=ProfileOut, status_code=201)

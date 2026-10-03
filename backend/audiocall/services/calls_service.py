@@ -386,7 +386,7 @@ async def start_outbound_call(
             "to demo the agent without a telephony provider.",
             config_error=True,
         )
-    if config.SERVER_HOST.startswith(("localhost", "127.0.0.1", "0.0.0.0")):
+    if config.is_local_host():
         raise await fail(
             "provider_error",
             f"SERVER_HOST is '{config.SERVER_HOST}', which Twilio can't reach. Set it to your "

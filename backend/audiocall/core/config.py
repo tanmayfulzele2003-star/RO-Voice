@@ -4,6 +4,11 @@ Split out from main.py so service modules and API routes can reuse the same
 Twilio client / server-host config without importing main.py itself (which
 would be a circular import, since main.py mounts the API routers that live in
 those same service/api modules).
+
+The Twilio credentials, caller number, Gemini key and public URL can also be
+saved from the dashboard (services/settings_service.py), which overrides the
+values here at runtime. Always read them as `config.NAME` at call time, never
+`from audiocall.core.config import NAME`, so a saved setting takes effect.
 """
 
 from __future__ import annotations
@@ -25,12 +30,37 @@ TWILIO_PHONE_NUMBER: str = os.environ.get("TWILIO_PHONE_NUMBER", "")
 # SERVER_HOST should be your public hostname (e.g. abc123.ngrok.io). Twilio
 # needs to reach this address for both the HTTP webhook and the WebSocket
 # media stream. Strip any accidental scheme prefix.
+# PUBLIC_URL (e.g. https://calls.example.com) sets both SERVER_HOST and
+# USE_TLS in one value and wins when present.
 _raw_host = os.environ.get("SERVER_HOST", "localhost:8000")
 SERVER_HOST: str = _raw_host.removeprefix("https://").removeprefix("http://").rstrip("/")
 USE_TLS: bool = os.environ.get("USE_TLS", "true").lower() == "true"
 
 WS_SCHEME = "wss" if USE_TLS else "ws"
 HTTP_SCHEME = "https" if USE_TLS else "http"
+
+
+def set_public_url(url: str) -> None:
+    """Point the webhook / media-stream URLs at `url` (scheme + host)."""
+    global SERVER_HOST, USE_TLS, WS_SCHEME, HTTP_SCHEME
+    url = url.strip().rstrip("/")
+    USE_TLS = not url.startswith("http://")
+    SERVER_HOST = url.removeprefix("https://").removeprefix("http://")
+    WS_SCHEME = "wss" if USE_TLS else "ws"
+    HTTP_SCHEME = "https" if USE_TLS else "http"
+
+
+def public_url() -> str:
+    return f"{HTTP_SCHEME}://{SERVER_HOST}"
+
+
+def is_local_host() -> bool:
+    """Twilio can't reach these — real phone calls need a public host."""
+    return SERVER_HOST.startswith(("localhost", "127.0.0.1", "0.0.0.0"))
+
+
+if os.environ.get("PUBLIC_URL"):
+    set_public_url(os.environ["PUBLIC_URL"])
 
 # The Next.js dashboard's origin, for CORS.
 FRONTEND_ORIGIN: str = os.environ.get("FRONTEND_ORIGIN", "http://localhost:3000")
@@ -94,3 +124,13 @@ DIAL_CALLS_PER_SECOND = float(os.environ.get("DIAL_CALLS_PER_SECOND", "1"))
 TRANSFER_RING_TIMEOUT_SECONDS = int(os.environ.get("TRANSFER_RING_TIMEOUT_SECONDS", "25"))
 
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+# Values as configured by the environment, for falling back to when a
+# dashboard setting is cleared.
+ENV_DEFAULTS: dict[str, str] = {
+    "twilio_account_sid": TWILIO_ACCOUNT_SID,
+    "twilio_auth_token": TWILIO_AUTH_TOKEN,
+    "twilio_phone_number": TWILIO_PHONE_NUMBER,
+    "google_api_key": os.environ.get("GOOGLE_API_KEY", ""),
+    "public_url": public_url(),
+}

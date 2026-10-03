@@ -82,6 +82,18 @@ _llm = GeminiNoThinking(
 
 
 
+# Lazily built (cached) genai clients on the model. They read GOOGLE_API_KEY
+# when first used, so dropping them makes the next call use a new key.
+_CLIENT_CACHE_ATTRS = ("api_client", "_api_backend", "_live_api_version", "_live_api_client")
+
+
+def reset_model_clients() -> None:
+    """Point future Gemini calls at the current GOOGLE_API_KEY (a key saved
+    in the dashboard). Live sessions already running keep their client."""
+    for attr in _CLIENT_CACHE_ATTRS:
+        _llm.__dict__.pop(attr, None)
+
+
 # ── Instructions (built per call from session state) ──────────────────────────
 def build_instruction(ctx: ReadonlyContext) -> str:
     return render_instruction(

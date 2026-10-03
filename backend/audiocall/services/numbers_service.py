@@ -120,12 +120,12 @@ async def sync_twilio(number_id: uuid.UUID) -> PhoneNumber:
         raise TwilioSyncFailed("Number not found")
     if not (config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN):
         raise TwilioSyncFailed("Twilio is not configured (TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN).")
-    if config.SERVER_HOST.startswith(("localhost", "127.0.0.1", "0.0.0.0")):
+    if config.is_local_host():
         raise TwilioSyncFailed(
             f"SERVER_HOST is '{config.SERVER_HOST}', which Twilio can't reach. "
             "Set it to your public host first."
         )
-    base = f"{config.HTTP_SCHEME}://{config.SERVER_HOST}"
+    base = config.public_url()
 
     def _sync() -> None:
         matches = config.twilio_client.incoming_phone_numbers.list(phone_number=row.number, limit=1)
