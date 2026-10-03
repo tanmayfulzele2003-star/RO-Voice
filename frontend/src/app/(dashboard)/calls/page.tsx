@@ -29,6 +29,8 @@ type CallsSearchParams = {
   outcome?: string;
   channel?: string;
   profile_id?: string;
+  direction?: string;
+  campaign_id?: string;
 };
 
 const FILTER_KEYS = [
@@ -41,6 +43,8 @@ const FILTER_KEYS = [
   "outcome",
   "channel",
   "profile_id",
+  "direction",
+  "campaign_id",
 ] as const;
 
 export default async function CallsPage({
@@ -148,6 +152,9 @@ export default async function CallsPage({
                   <TD>{call.follow_up == null ? "—" : call.follow_up ? "Yes" : "No"}</TD>
                   <TD>
                     <ChannelBadge channel={call.channel} />
+                    {call.direction === "inbound" ? (
+                      <p className="mt-1 text-xs text-muted-foreground">Inbound</p>
+                    ) : null}
                   </TD>
                 </TR>
               ))}

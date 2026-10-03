@@ -18,6 +18,7 @@ export type CallOutcome =
   | "qualified"
   | "not_interested"
   | "callback"
+  | "transferred"
   | "incomplete"
   | "no_answer"
   | "no_conversation"
@@ -41,6 +42,8 @@ export interface BusinessProfile {
   greeting: string | null;
   language: string | null;
   fields: ProfileField[];
+  /** E.164 number of a person the agent can hand phone calls to. */
+  transfer_number: string | null;
   is_default: boolean;
   created_at: string;
 }
@@ -100,6 +103,10 @@ export interface CallListItem {
   profile_name: string | null;
   direction: CallDirection;
   channel: CallChannel;
+  from_number: string | null;
+  to_number: string | null;
+  campaign_id: string | null;
+  transferred_to: string | null;
   status: CallStatus;
   outcome: CallOutcome | null;
   lead_status: LeadStatus | null;
@@ -160,6 +167,10 @@ export interface CallDetail {
   twilio_call_sid: string | null;
   direction: CallDirection;
   channel: CallChannel;
+  from_number: string | null;
+  to_number: string | null;
+  campaign_id: string | null;
+  transferred_to: string | null;
   status: CallStatus;
   outcome: CallOutcome | null;
   start_time: string | null;
@@ -185,3 +196,77 @@ export interface StatsOverview {
   follow_ups_required: number;
   avg_duration_seconds: number | null;
 }
+
+export interface PhoneNumber {
+  id: string;
+  number: string;
+  label: string | null;
+  /** null = shared pool, usable by every business. */
+  profile_id: string | null;
+  inbound_enabled: boolean;
+  outbound_enabled: boolean;
+  is_active: boolean;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+export type PhoneNumberInput = Pick<
+  PhoneNumber,
+  "number" | "label" | "profile_id" | "inbound_enabled" | "outbound_enabled" | "is_active"
+>;
+
+export type CampaignStatus = "draft" | "running" | "paused" | "completed" | "cancelled";
+
+export type CampaignContactStatus = "pending" | "dialing" | "completed" | "failed" | "cancelled";
+
+export interface CampaignCounts {
+  pending: number;
+  dialing: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  total: number;
+}
+
+export interface Campaign {
+  id: string;
+  name: string;
+  profile_id: string | null;
+  status: CampaignStatus;
+  /** Why the dialer paused the campaign on its own, e.g. Twilio credentials rejected. */
+  status_reason: string | null;
+  max_concurrent: number;
+  max_attempts: number;
+  retry_delay_minutes: number;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  counts: CampaignCounts;
+}
+
+export interface CampaignContact {
+  id: string;
+  customer_id: string;
+  customer_name: string;
+  customer_phone: string;
+  status: CampaignContactStatus;
+  attempts: number;
+  last_call_id: string | null;
+  last_outcome: string | null;
+  next_attempt_at: string | null;
+}
+
+export interface CampaignDetail extends Campaign {
+  contacts: CampaignContact[];
+}
+
+export interface CampaignCreateInput {
+  name: string;
+  profile_id: string | null;
+  customer_ids: string[];
+  max_concurrent: number;
+  max_attempts: number;
+  retry_delay_minutes: number;
+}
+
+export type CampaignAction = "start" | "pause" | "cancel";

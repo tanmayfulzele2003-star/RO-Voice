@@ -3,6 +3,10 @@ import type {
   BusinessProfile,
   BusinessProfileInput,
   CallDetail,
+  CampaignAction,
+  Campaign,
+  CampaignCreateInput,
+  CampaignDetail,
   CallListItem,
   CallStartResponse,
   Customer,
@@ -10,6 +14,8 @@ import type {
   CustomerUpdateInput,
   LoginResponse,
   Paginated,
+  PhoneNumber,
+  PhoneNumberInput,
   StatsOverview,
 } from "@/types/api";
 
@@ -109,6 +115,8 @@ export interface CallListFilters {
   outcome?: string;
   channel?: string;
   profile_id?: string;
+  direction?: string;
+  campaign_id?: string;
   [key: string]: string | number | undefined;
 }
 
@@ -164,6 +172,26 @@ export function makeApiClient(cookieHeader?: string) {
     listCalls: (params: CallListFilters = {}) =>
       request<Paginated<CallListItem>>("/api/calls", { searchParams: params }, cookieHeader),
     getCall: (id: string) => request<CallDetail>(`/api/calls/${id}`, {}, cookieHeader),
+
+    listNumbers: () => request<PhoneNumber[]>("/api/numbers", {}, cookieHeader),
+    createNumber: (input: PhoneNumberInput) =>
+      request<PhoneNumber>("/api/numbers", { method: "POST", body: input }, cookieHeader),
+    updateNumber: (id: string, input: Partial<PhoneNumberInput>) =>
+      request<PhoneNumber>(`/api/numbers/${id}`, { method: "PATCH", body: input }, cookieHeader),
+    deleteNumber: (id: string) =>
+      request<void>(`/api/numbers/${id}`, { method: "DELETE" }, cookieHeader),
+    syncNumberToTwilio: (id: string) =>
+      request<PhoneNumber>(`/api/numbers/${id}/sync-twilio`, { method: "POST" }, cookieHeader),
+
+    listCampaigns: () => request<Campaign[]>("/api/campaigns", {}, cookieHeader),
+    getCampaign: (id: string) =>
+      request<CampaignDetail>(`/api/campaigns/${id}`, {}, cookieHeader),
+    createCampaign: (input: CampaignCreateInput) =>
+      request<CampaignDetail>("/api/campaigns", { method: "POST", body: input }, cookieHeader),
+    changeCampaignStatus: (id: string, action: CampaignAction) =>
+      request<CampaignDetail>(`/api/campaigns/${id}/${action}`, { method: "POST" }, cookieHeader),
+    deleteCampaign: (id: string) =>
+      request<void>(`/api/campaigns/${id}`, { method: "DELETE" }, cookieHeader),
 
     getStatsOverview: () =>
       request<StatsOverview>("/api/stats/overview", {}, cookieHeader),
