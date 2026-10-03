@@ -136,27 +136,159 @@ still being written. Analysis:
 A failed extraction is retried once. After that it's recorded as an `analysis_failed` event, and
 the agent's own `end_call` verdict stays as the lead status and follow-up flag.
 
+## Telephony: numbers, inbound calls, campaigns and human transfer
+
+The phone channel goes beyond one number and one manual call. There are four parts, and all of
+them run on the same `CallBridge` and agent.
+
+```mermaid
+flowchart LR
+    subgraph Pool["phone_numbers (pool)"]
+        N1["+91… sales\nprofile: RO"]
+        N2["+91… support\nprofile: Solar"]
+        N3["+1… shared\nprofile: none"]
+    end
+
+    Dialer["Campaign dialer\n(dialer.py, background task)"] -- "claim contacts\nFOR UPDATE SKIP LOCKED" --> CC[(campaign_contacts)]
+    Dialer -- "start_outbound_call" --> Pick["pick_outbound_number\n(profile's numbers → shared pool → env)"]
+    Manual["POST /api/calls"] --> Pick
+    Pick --> Pool
+    Pick -- "calls.create from=…" --> Twilio[Twilio]
+
+    Caller((Caller dials\nany pool number)) --> Twilio
+    Twilio -- "/voice (To, From)" --> Route["Inbound routing\nTo → number → profile\ncapacity check"]
+    Route -- "<Connect><Stream>" --> Bridge[CallBridge + agent]
+
+    Bridge -- "agent calls\ntransfer_to_human" --> Xfer["calls.update(twiml=\n<Dial><Number url=whisper>)"]
+    Xfer --> Twilio
+    Twilio -- "rings" --> Human((Human agent\nprofile.transfer_number))
+    Twilio -- "/transfer-whisper" --> Whisper["Say summary\nto the human first"]
+    Twilio -- "/transfer-status\n(DialCallStatus)" --> Fallback["answered → done\nno answer → apology + callback"]
+```
+
+### 1. Several numbers (`phone_numbers`)
+
+A number is a Twilio number the account owns, registered in the dashboard. It has a `label`,
+an optional `profile_id` (the business it belongs to), `inbound_enabled`, `outbound_enabled`,
+`is_active` and `last_used_at`.
+
+* **Outbound caller ID** (`numbers_service.pick_outbound_number(profile_id)`):
+  1. the active, outbound-enabled numbers assigned to the call's profile;
+  2. else the shared pool (active, outbound-enabled, no profile);
+  3. else `TWILIO_PHONE_NUMBER` from the environment, so a single-number setup keeps working
+     with no rows at all.
+
+  Within a tier, the **least recently used** number wins (`last_used_at NULLS FIRST`). It's
+  claimed with `SELECT … FOR UPDATE SKIP LOCKED`, so parallel dials spread across the pool.
+* **Inbound routing** uses Twilio's `To` field. The profile of the number that was dialled
+  decides which business answers.
+* **Twilio setup from the dashboard:** `POST /api/numbers/{id}/sync-twilio` sets the number's
+  *A call comes in* webhook (`/voice`) and status callback (`/call-status`) through the Twilio
+  REST API. Nobody has to edit the console by hand.
+* Each call records `from_number`, `to_number` and `phone_number_id`.
+
+### 2. Inbound calls
+
+`POST /voice` with no `call_id` is an inbound call:
+
+1. Look up `To` in `phone_numbers`. If the number is registered but inactive or has inbound
+   switched off, answer with a short `<Say>` and `<Hangup>`. An unregistered number is still
+   answered with the default profile (backwards compatible).
+2. Find or create the customer by `From`. Profile precedence: the dialled number's profile,
+   then the customer's profile, then the default.
+3. **Capacity check:** if `MAX_CONCURRENT_CALLS` phone calls are already active, the caller is
+   sent straight to the profile's `transfer_number`, or hears a "lines are busy" message. Either
+   way the call is recorded with `error_reason=capacity`.
+4. Otherwise return `<Connect><Stream>` as usual. The bridge puts `direction=inbound` in the
+   session state. The agent's instructions and opening prompt then switch from "I'm calling
+   about…" to "Thanks for calling, how can I help?".
+
+### 3. Many calls at once: campaigns
+
+A **campaign** is a list of customers (`campaign_contacts`) plus dialing rules:
+`max_concurrent`, `max_attempts`, `retry_delay_minutes`, and an optional profile override.
+States: `draft → running ⇄ paused → completed`, or `cancelled` at any point.
+
+`audiocall/dialer.py` runs as a background task in the FastAPI lifespan (`DIALER_ENABLED`).
+Every `DIALER_INTERVAL_SECONDS` it does three things:
+
+1. **Reconciles.** Each `dialing` contact whose last call is terminal becomes `completed`, or
+   goes back to `pending` with `next_attempt_at = now + retry_delay`. The retry happens when the
+   call was `no_answer` or `failed` and attempts remain (`campaigns_service.next_contact_state`,
+   a pure function). A call stuck non-terminal past the stale window counts as failed.
+2. **Dials.** For each running campaign:
+   `slots = min(max_concurrent − dialing, MAX_CONCURRENT_CALLS − active phone calls)`. It claims
+   that many due contacts with `FOR UPDATE SKIP LOCKED`, so two server processes never dial the
+   same contact. It then calls `start_outbound_call(customer, profile_override, campaign_id)`,
+   with dials spaced `1 / DIAL_CALLS_PER_SECOND` apart to stay under Twilio's CPS limit.
+3. **Completes** running campaigns that have no `pending` or `dialing` contacts left.
+
+Pausing stops new dials but lets live calls finish. Cancelling also marks the pending contacts
+`cancelled`. Manual `POST /api/calls` respects the same global `MAX_CONCURRENT_CALLS` and returns
+429 when every line is busy.
+
+Running calls in parallel needs no extra machinery: every Twilio media stream is its own
+WebSocket handled by its own `CallBridge` task and its own Gemini Live session. The real limits
+are Twilio CPS, Gemini Live's concurrent-session quota and `MAX_CONCURRENT_CALLS`.
+
+### 4. Transfer to a real person
+
+A profile can have a `transfer_number` (E.164). On a **phone** call with a transfer number, the
+agent gets a fourth tool:
+
+| Tool | Effect |
+|---|---|
+| `transfer_to_human(reason, summary)` | Records a `transfer_requested` event (with the summary for the human) and tells the agent to say one short "connecting you now" line. On browser calls, or when the profile has no transfer number, it returns `unavailable` and the agent offers a callback instead |
+
+The bridge treats it like `end_call`. It waits for the agent's line to finish playing (the same
+mark mechanism), then `TwilioTransport.transfer()` **redirects the live call** with new TwiML
+*before* it closes the stream socket. The order matters: closing the socket first would make
+Twilio run out of TwiML and hang up.
+
+```xml
+<Response>
+  <Dial callerId="{business number}" timeout="25"
+        action="/transfer-status?call_id=…" method="POST">
+    <Number url="/transfer-whisper?call_id=…">{transfer_number}</Number>
+  </Dial>
+</Response>
+```
+
+* **Whisper:** `/transfer-whisper` is played only to the human, before the two sides are
+  connected: "Transferred call from Rahul Kumar. {agent's summary}". That makes it a warm
+  handoff without a conference bridge.
+* **Fallback:** `/transfer-status` gets `DialCallStatus`. `completed` means the human
+  conversation happened, so the call hangs up. Anything else (`no-answer`, `busy`, `failed`)
+  plays an apology, records `transfer_failed` and sets the outcome to `callback`.
+* **Caller ID:** the business number, meaning `from_number` on outbound calls and `to_number`
+  on inbound ones. Twilio only allows caller IDs the account owns or has verified.
+* **Record keeping:** `calls.transferred_to` is set, the outcome is `transferred`, and the
+  status stays `in_progress` until Twilio's final `completed` callback. Post-call analysis still
+  writes the summary, but it never overwrites the `transferred` or `callback` outcome. The AI
+  part of the transcript is kept. The human part isn't recorded.
+
 ## Outcome vs. status
 
 `status` is the telephony lifecycle (`queued, ringing, in_progress, completed, failed, no_answer,
 disconnected`). `outcome` is what the call achieved (`qualified, not_interested, callback,
-incomplete, no_answer, no_conversation, failed`). It's set from the status when the call becomes
+transferred, incomplete, no_answer, no_conversation, failed`). It's set from the status when the call becomes
 terminal, and refined by the agent's verdict and then the AI analysis (`services/outcome.py`).
 
 ## Request paths and their guards
 
 | Path | Guard | Why |
 |---|---|---|
-| `/voice`, `/call-status` | Twilio `X-Twilio-Signature` HMAC validation (`verify_twilio_signature`). On failure the backend logs the URL it validated against | Only Twilio, which holds `TWILIO_AUTH_TOKEN`, can produce a valid signature. This stops forged webhooks from creating fake calls or corrupting call status |
+| `/voice`, `/call-status`, `/transfer-status`, `/transfer-whisper` | Twilio `X-Twilio-Signature` HMAC validation (`verify_twilio_signature`). On failure the backend logs the URL it validated against | Only Twilio, which holds `TWILIO_AUTH_TOKEN`, can produce a valid signature. This stops forged webhooks from creating fake calls or corrupting call status |
 | `/api/*` (except `/api/auth/login`) | `require_admin` FastAPI dependency: signed session cookie | Keeps the dashboard's data endpoints from being open to the internet |
-| `POST /api/calls`, `POST /api/calls/browser` | Same session guard + in-memory sliding-window rate limit (5 per 60 s per admin username) | Outbound calling is billable, and AI sessions cost quota |
+| `POST /api/calls`, `POST /api/calls/browser` | Same session guard + in-memory sliding-window rate limit (5 per 60 s per admin username). Phone calls are also capped by `MAX_CONCURRENT_CALLS` | Outbound calling is billable, and AI sessions cost quota |
+| Campaign dialer | Runs inside the server, no HTTP surface. Started and stopped through the session-guarded `/api/campaigns/*` routes | Bulk dialing is the most expensive action, so it only runs from campaigns an admin started |
 | `/browser-stream` (WebSocket) | HMAC token from `POST /api/calls/browser`, bound to one `call_id`, valid for 2 minutes. Only accepted while that call is still `queued` on the `browser` channel | Cookies can't be relied on cross-site for WebSockets; the token can't be reused or pointed at another call |
 | `/stream` (WebSocket) | None beyond `call_id` correlation | Twilio's Media Streams protocol has no signature scheme for WebSocket connections. The URL is only ever handed to Twilio via the signed `/voice` TwiML response |
 | Dashboard pages | `proxy.ts` cookie-presence check, **plus** every Server Component's data fetch getting a real 401 from the backend and redirecting | The backend dependency is the actual security boundary |
 
 ## Database
 
-Seven domain tables plus `admin_users` and `alembic_version`. Full column list in
+Ten domain tables plus `admin_users` and `alembic_version`. Full column list in
 [database/schema.sql](database/schema.sql). Migrations in `backend/alembic/versions/` are the
 source of truth.
 
@@ -169,6 +301,11 @@ erDiagram
     CALLS ||--o{ CALL_EVENTS : logs
     CALLS ||--o| REQUIREMENTS : collects
     CALLS ||--o| CALL_SUMMARIES : summarizes
+    BUSINESS_PROFILES ||--o{ PHONE_NUMBERS : "answers on"
+    PHONE_NUMBERS ||--o{ CALLS : "carried"
+    CAMPAIGNS ||--o{ CAMPAIGN_CONTACTS : dials
+    CUSTOMERS ||--o{ CAMPAIGN_CONTACTS : "is in"
+    CAMPAIGNS ||--o{ CALLS : placed
 
     BUSINESS_PROFILES {
         uuid id PK
@@ -181,6 +318,7 @@ erDiagram
         text greeting
         text language
         jsonb fields "checklist: key, label, description, required"
+        text transfer_number "E.164, human hand-off"
         boolean is_default "partial unique index"
         timestamptz created_at
     }
@@ -201,6 +339,11 @@ erDiagram
         text twilio_call_sid UK
         text direction
         text channel "phone | browser"
+        text from_number
+        text to_number
+        uuid phone_number_id FK
+        uuid campaign_id FK
+        text transferred_to
         text status
         timestamptz start_time
         timestamptz end_time
@@ -236,6 +379,37 @@ erDiagram
         text timeline
         text additional_requirements
     }
+    PHONE_NUMBERS {
+        uuid id PK
+        text number UK "E.164"
+        text label
+        uuid profile_id FK "null = shared pool"
+        boolean inbound_enabled
+        boolean outbound_enabled
+        boolean is_active
+        timestamptz last_used_at "round-robin"
+    }
+    CAMPAIGNS {
+        uuid id PK
+        text name
+        uuid profile_id FK "null = each customer's profile"
+        text status "draft | running | paused | completed | cancelled"
+        int max_concurrent
+        int max_attempts
+        int retry_delay_minutes
+        timestamptz started_at
+        timestamptz completed_at
+    }
+    CAMPAIGN_CONTACTS {
+        uuid id PK
+        uuid campaign_id FK
+        uuid customer_id FK
+        text status "pending | dialing | completed | failed | cancelled"
+        int attempts
+        uuid last_call_id FK
+        text last_outcome
+        timestamptz next_attempt_at
+    }
     CALL_SUMMARIES {
         uuid id PK
         uuid call_id FK "unique — 1:1"
@@ -265,15 +439,18 @@ backend/audiocall/
 ├── conversation.py      # pure checklist logic (next field, progress) used by the tools
 ├── profiles.py          # default RO profile + field-key helpers
 ├── phone.py             # E.164 normalisation / validation
+├── dialer.py            # campaign dialer background task (reconcile → dial → complete)
 ├── voice/               # transports.py (Twilio, browser) + bridge.py (conversation engine)
 ├── core/                # config, security (sessions, Twilio signature, stream tokens), rate limit
 ├── db/                  # SQLAlchemy models + async session
 ├── services/            # calls, customers, profiles, requirements, transcript, events,
-│                        #   summary (post-call AI), outcome, stats, auth
-└── api/                 # /api/* routers + Pydantic schemas
+│                        #   summary (post-call AI), outcome, stats, auth,
+│                        #   numbers (pool + Twilio sync), campaigns, telephony (TwiML)
+└── api/                 # /api/* routers + Pydantic schemas (incl. numbers, campaigns)
 backend/tests/           # pytest: conversation, validation, transports, simulated calls
 frontend/src/
-├── app/(dashboard)/     # overview, customers (+ /[id]/call browser call), calls, profiles
+├── app/(dashboard)/     # overview, customers (+ /[id]/call browser call), calls, profiles,
+│                        #   numbers, campaigns
 ├── components/sections/ # BrowserCall, ProfileForm, CustomerForm, CallEventsTimeline, …
 ├── lib/                 # apiClient, serverApiClient, auth, formatters
 └── proxy.ts             # Next.js 16's replacement for middleware.ts
@@ -285,7 +462,8 @@ frontend/public/audio/pcm-capture-worklet.js  # mic → PCM-16 16 kHz
 - **Single admin role.** `admin_users` supports several rows, but there's no self-registration
   or role model. An operator creates users with `scripts/create_admin.py`.
 - **In-process state.** The rate limiter, ADK `InMemorySessionService` and the
-  analysis-scheduled guard live in one process. Scaling out needs sticky WebSocket routing and a
+  analysis-scheduled guard live in one process. (The campaign dialer is already safe to run
+  in several processes: it claims contacts with `SKIP LOCKED`.) Scaling out needs sticky WebSocket routing and a
   shared store (Redis) for the rate limiter.
 - **No session revocation.** Session tokens are stateless signed `username:expiry` pairs.
   Revoking one early means rotating `SESSION_SECRET`.
@@ -296,6 +474,12 @@ frontend/public/audio/pcm-capture-worklet.js  # mic → PCM-16 16 kHz
   apology and the call ends as `ai_error`, rather than reconnecting transparently.
 - **The speech-recognition-failure heuristic is energy-based.** Persistent loud background noise
   with no speech could trigger a "please repeat" prompt, at most once every 20 seconds.
+- **Transfer is a cold-plus-whisper handoff.** The human hears the agent's summary, then is
+  connected. The human part of the conversation isn't recorded or transcribed, and there's no
+  hold music or queue. Several agents or a ring group would need a TwiML `<Dial>` with several
+  `<Number>`s, or a Twilio TaskRouter integration.
+- **Transfers don't work on browser calls.** No phone line exists to redirect, so the tool
+  answers `unavailable` and the agent offers a callback.
 - **Tests fake the AI and the telephony.** The pytest suite covers the conversation engine,
   tools, validation and transports with Gemini and Twilio faked. Real audio quality and model
   behaviour still need a manual end-to-end call.
