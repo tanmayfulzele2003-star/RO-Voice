@@ -270,3 +270,62 @@ export interface CampaignCreateInput {
 }
 
 export type CampaignAction = "start" | "pause" | "cancel";
+
+export type SettingKey =
+  | "twilio_account_sid"
+  | "twilio_auth_token"
+  | "twilio_phone_number"
+  | "google_api_key"
+  | "public_url";
+
+export interface SettingValue {
+  label: string;
+  secret: boolean;
+  /** Masked for secrets ("••••••••1234"). */
+  value: string;
+  is_set: boolean;
+  source: "dashboard" | "environment" | "unset";
+}
+
+export type SettingsView = Record<SettingKey, SettingValue>;
+
+/** Only keys sent are changed; "" removes the saved value. */
+export type SettingsUpdate = Partial<Record<SettingKey, string>>;
+
+export interface TwilioAccountNumber {
+  number: string;
+  friendly_name: string;
+  registered: boolean;
+}
+
+export interface TestResult {
+  ok: boolean;
+  message: string;
+  details: { account_type?: string; numbers?: TwilioAccountNumber[] } | null;
+}
+
+export interface SetupStatus {
+  needs_admin: boolean;
+}
+
+export type ChecklistKey = "twilio" | "number" | "gemini" | "public_url" | "profile" | "test_call";
+
+export interface ChecklistItem {
+  key: ChecklistKey;
+  label: string;
+  done: boolean;
+  hint: string;
+}
+
+export interface SetupChecklist {
+  items: ChecklistItem[];
+  complete: boolean;
+  dismissed: boolean;
+}
+
+export interface ProfileTemplate {
+  id: string;
+  title: string;
+  summary: string;
+  profile: Omit<BusinessProfileInput, "is_default" | "transfer_number">;
+}

@@ -14,6 +14,7 @@ import re
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
+from twilio.base.exceptions import TwilioRestException
 
 from audiocall.api.auth import require_admin
 from audiocall.core import config
@@ -96,8 +97,10 @@ async def test_twilio() -> TestResult:
 
     try:
         account, numbers = await asyncio.to_thread(_check)
-    except Exception as exc:  # Twilio REST errors, network
-        return TestResult(ok=False, message=f"Twilio rejected these credentials: {exc}")
+    except TwilioRestException as exc:
+        return TestResult(ok=False, message=f"Twilio rejected these credentials: {exc.msg}")
+    except Exception as exc:  # network, proxy, DNS
+        return TestResult(ok=False, message=f"Couldn't reach Twilio from this server: {exc}")
     registered = {n.number for n in await numbers_service.list_numbers()}
     return TestResult(
         ok=True,

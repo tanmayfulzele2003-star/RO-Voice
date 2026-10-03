@@ -69,12 +69,11 @@ async def _clear_other_defaults(session, keep_id: uuid.UUID) -> None:  # noqa: A
 
 async def create_profile(data: dict[str, Any]) -> BusinessProfile:
     async with get_session_factory()() as session:
-        profile = BusinessProfile(**data)
-        session.add(profile)
-        await session.flush()
+        profile = BusinessProfile(id=uuid.uuid4(), **data)
         if profile.is_default:
+            # Unset the old default first: at most one row may be default.
             await _clear_other_defaults(session, profile.id)
-            await session.flush()
+        session.add(profile)
         await session.commit()
         await session.refresh(profile)
         return profile

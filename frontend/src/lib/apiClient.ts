@@ -16,7 +16,13 @@ import type {
   Paginated,
   PhoneNumber,
   PhoneNumberInput,
+  ProfileTemplate,
+  SettingsUpdate,
+  SettingsView,
+  SetupChecklist,
+  SetupStatus,
   StatsOverview,
+  TestResult,
 } from "@/types/api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -192,6 +198,26 @@ export function makeApiClient(cookieHeader?: string) {
       request<CampaignDetail>(`/api/campaigns/${id}/${action}`, { method: "POST" }, cookieHeader),
     deleteCampaign: (id: string) =>
       request<void>(`/api/campaigns/${id}`, { method: "DELETE" }, cookieHeader),
+
+    getSetupStatus: () => request<SetupStatus>("/api/setup/status", {}, cookieHeader),
+    createFirstAdmin: (input: { token: string; username: string; password: string }) =>
+      request<SetupStatus>("/api/setup/admin", { method: "POST", body: input }, cookieHeader),
+    getSetupChecklist: () => request<SetupChecklist>("/api/setup/checklist", {}, cookieHeader),
+    setSetupFlag: (key: "setup_profile" | "setup_completed", value: boolean) =>
+      request<void>("/api/setup/flags", { method: "POST", body: { key, value } }, cookieHeader),
+
+    getSettings: () => request<SettingsView>("/api/settings", {}, cookieHeader),
+    updateSettings: (input: SettingsUpdate) =>
+      request<SettingsView>("/api/settings", { method: "PATCH", body: input }, cookieHeader),
+    testTwilio: () =>
+      request<TestResult>("/api/settings/test-twilio", { method: "POST" }, cookieHeader),
+    testGemini: () =>
+      request<TestResult>("/api/settings/test-gemini", { method: "POST" }, cookieHeader),
+    testPublicUrl: () =>
+      request<TestResult>("/api/settings/test-public-url", { method: "POST" }, cookieHeader),
+
+    listProfileTemplates: () =>
+      request<ProfileTemplate[]>("/api/profiles/templates", {}, cookieHeader),
 
     getStatsOverview: () =>
       request<StatsOverview>("/api/stats/overview", {}, cookieHeader),

@@ -220,3 +220,20 @@ def test_flag_keys_cannot_overwrite_settings():
         import asyncio
 
         asyncio.run(settings_service.set_flag("twilio_auth_token", "x"))
+
+
+@needs_db
+async def test_creating_a_new_default_profile_moves_the_default(db):
+    from audiocall.profiles import DEFAULT_RO_PROFILE
+    from audiocall.services import profiles_service
+
+    old_default = await profiles_service.get_default_profile()
+    created = await profiles_service.create_profile(
+        {**DEFAULT_RO_PROFILE, "name": f"Default test {uuid.uuid4().hex[:6]}", "is_default": True}
+    )
+    try:
+        assert (await profiles_service.get_default_profile()).id == created.id
+        assert (await profiles_service.get_profile(old_default.id)).is_default is False
+    finally:
+        await profiles_service.update_profile(old_default.id, {"is_default": True})
+        await profiles_service.delete_profile(created.id)

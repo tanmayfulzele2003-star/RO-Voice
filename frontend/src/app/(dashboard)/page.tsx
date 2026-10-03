@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import { PageShell } from "@/components/layout/PageShell";
 import { StatTile, StatTileRow } from "@/components/sections/StatTile";
+import { SetupBanner } from "@/components/sections/setup/SetupBanner";
 import { ErrorState } from "@/components/ui/States";
 import { redirectIfUnauthenticated } from "@/lib/auth";
 import { ApiError } from "@/lib/apiClient";
 import { getServerApiClient } from "@/lib/serverApiClient";
 import { formatDuration } from "@/lib/formatters";
-import type { StatsOverview } from "@/types/api";
+import type { SetupChecklist, StatsOverview } from "@/types/api";
 
 export const metadata: Metadata = {
   title: "Overview",
@@ -15,11 +16,15 @@ export const metadata: Metadata = {
 
 export default async function DashboardPage() {
   let stats: StatsOverview | null = null;
+  let checklist: SetupChecklist | null = null;
   let loadError: string | null = null;
 
   try {
     const apiClient = await getServerApiClient();
-    stats = await apiClient.getStatsOverview();
+    [stats, checklist] = await Promise.all([
+      apiClient.getStatsOverview(),
+      apiClient.getSetupChecklist().catch(() => null), // the banner is optional
+    ]);
   } catch (err) {
     redirectIfUnauthenticated(err);
     loadError = err instanceof ApiError ? err.message : "Failed to load dashboard stats.";
@@ -30,6 +35,7 @@ export default async function DashboardPage() {
       title="Overview"
       description="Snapshot of every call the AI agent has placed or received."
     >
+      <SetupBanner checklist={checklist} />
       {loadError || !stats ? (
         <ErrorState message={loadError ?? "Failed to load dashboard stats."} />
       ) : (

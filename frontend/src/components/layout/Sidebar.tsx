@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { href: "/campaigns", label: "Campaigns" },
   { href: "/numbers", label: "Phone numbers" },
   { href: "/profiles", label: "Business profiles" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function Sidebar() {
