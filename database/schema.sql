@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict uvCwzU3u1tPkRy9q2Hj2szFMbnRiTriuXgwxApIpYi2OdsqzzDk9uhOC21unkeL
+\restrict FLLsxbOXXQwLijUEP1X9mXYFpM8TU2Unf5E2GdT4CU0zcMe1resf9AaEq6fKIBH
 
 -- Dumped from database version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
 -- Dumped by pg_dump version 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)
@@ -59,7 +59,8 @@ CREATE TABLE public.business_profiles (
     language text,
     fields jsonb NOT NULL,
     is_default boolean DEFAULT false NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    transfer_number text
 );
 
 
@@ -112,7 +113,47 @@ CREATE TABLE public.calls (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     profile_id uuid,
     channel text DEFAULT 'phone'::text NOT NULL,
-    outcome text
+    outcome text,
+    from_number text,
+    to_number text,
+    phone_number_id uuid,
+    campaign_id uuid,
+    transferred_to text
+);
+
+
+--
+-- Name: campaign_contacts; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.campaign_contacts (
+    id uuid NOT NULL,
+    campaign_id uuid NOT NULL,
+    customer_id uuid NOT NULL,
+    status text DEFAULT 'pending'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    last_call_id uuid,
+    last_outcome text,
+    next_attempt_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: campaigns; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.campaigns (
+    id uuid NOT NULL,
+    name text NOT NULL,
+    profile_id uuid,
+    status text DEFAULT 'draft'::text NOT NULL,
+    max_concurrent integer NOT NULL,
+    max_attempts integer NOT NULL,
+    retry_delay_minutes integer NOT NULL,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -142,6 +183,23 @@ CREATE TABLE public.customers (
     purpose text,
     product text,
     profile_id uuid
+);
+
+
+--
+-- Name: phone_numbers; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.phone_numbers (
+    id uuid NOT NULL,
+    number text NOT NULL,
+    label text,
+    profile_id uuid,
+    inbound_enabled boolean DEFAULT true NOT NULL,
+    outbound_enabled boolean DEFAULT true NOT NULL,
+    is_active boolean DEFAULT true NOT NULL,
+    last_used_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 
@@ -237,6 +295,22 @@ ALTER TABLE ONLY public.calls
 
 
 --
+-- Name: campaign_contacts campaign_contacts_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaign_contacts
+    ADD CONSTRAINT campaign_contacts_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: campaigns campaigns_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaigns
+    ADD CONSTRAINT campaigns_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: conversation_messages conversation_messages_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -250,6 +324,22 @@ ALTER TABLE ONLY public.conversation_messages
 
 ALTER TABLE ONLY public.customers
     ADD CONSTRAINT customers_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: phone_numbers phone_numbers_number_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.phone_numbers
+    ADD CONSTRAINT phone_numbers_number_key UNIQUE (number);
+
+
+--
+-- Name: phone_numbers phone_numbers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.phone_numbers
+    ADD CONSTRAINT phone_numbers_pkey PRIMARY KEY (id);
 
 
 --
@@ -269,10 +359,25 @@ ALTER TABLE ONLY public.requirements
 
 
 --
+-- Name: campaign_contacts uq_campaign_contacts_customer; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaign_contacts
+    ADD CONSTRAINT uq_campaign_contacts_customer UNIQUE (campaign_id, customer_id);
+
+
+--
 -- Name: ix_call_events_call_id; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX ix_call_events_call_id ON public.call_events USING btree (call_id);
+
+
+--
+-- Name: ix_calls_campaign_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_calls_campaign_id ON public.calls USING btree (campaign_id);
 
 
 --
@@ -290,6 +395,13 @@ CREATE INDEX ix_calls_outcome ON public.calls USING btree (outcome);
 
 
 --
+-- Name: ix_calls_phone_number_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_calls_phone_number_id ON public.calls USING btree (phone_number_id);
+
+
+--
 -- Name: ix_calls_profile_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -304,6 +416,27 @@ CREATE INDEX ix_calls_status ON public.calls USING btree (status);
 
 
 --
+-- Name: ix_campaign_contacts_campaign_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_campaign_contacts_campaign_status ON public.campaign_contacts USING btree (campaign_id, status);
+
+
+--
+-- Name: ix_campaign_contacts_customer_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_campaign_contacts_customer_id ON public.campaign_contacts USING btree (customer_id);
+
+
+--
+-- Name: ix_campaigns_status; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_campaigns_status ON public.campaigns USING btree (status);
+
+
+--
 -- Name: ix_conversation_messages_call_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -315,6 +448,13 @@ CREATE INDEX ix_conversation_messages_call_id ON public.conversation_messages US
 --
 
 CREATE INDEX ix_customers_profile_id ON public.customers USING btree (profile_id);
+
+
+--
+-- Name: ix_phone_numbers_profile_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX ix_phone_numbers_profile_id ON public.phone_numbers USING btree (profile_id);
 
 
 --
@@ -341,6 +481,14 @@ ALTER TABLE ONLY public.call_summaries
 
 
 --
+-- Name: calls calls_campaign_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.calls
+    ADD CONSTRAINT calls_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES public.campaigns(id) ON DELETE SET NULL;
+
+
+--
 -- Name: calls calls_customer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -349,11 +497,51 @@ ALTER TABLE ONLY public.calls
 
 
 --
+-- Name: calls calls_phone_number_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.calls
+    ADD CONSTRAINT calls_phone_number_id_fkey FOREIGN KEY (phone_number_id) REFERENCES public.phone_numbers(id) ON DELETE SET NULL;
+
+
+--
 -- Name: calls calls_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.calls
     ADD CONSTRAINT calls_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.business_profiles(id) ON DELETE SET NULL;
+
+
+--
+-- Name: campaign_contacts campaign_contacts_campaign_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaign_contacts
+    ADD CONSTRAINT campaign_contacts_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES public.campaigns(id) ON DELETE CASCADE;
+
+
+--
+-- Name: campaign_contacts campaign_contacts_customer_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaign_contacts
+    ADD CONSTRAINT campaign_contacts_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id) ON DELETE CASCADE;
+
+
+--
+-- Name: campaign_contacts campaign_contacts_last_call_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaign_contacts
+    ADD CONSTRAINT campaign_contacts_last_call_id_fkey FOREIGN KEY (last_call_id) REFERENCES public.calls(id) ON DELETE SET NULL;
+
+
+--
+-- Name: campaigns campaigns_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.campaigns
+    ADD CONSTRAINT campaigns_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.business_profiles(id) ON DELETE SET NULL;
 
 
 --
@@ -373,6 +561,14 @@ ALTER TABLE ONLY public.customers
 
 
 --
+-- Name: phone_numbers phone_numbers_profile_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.phone_numbers
+    ADD CONSTRAINT phone_numbers_profile_id_fkey FOREIGN KEY (profile_id) REFERENCES public.business_profiles(id) ON DELETE SET NULL;
+
+
+--
 -- Name: requirements requirements_call_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -384,5 +580,5 @@ ALTER TABLE ONLY public.requirements
 -- PostgreSQL database dump complete
 --
 
-\unrestrict uvCwzU3u1tPkRy9q2Hj2szFMbnRiTriuXgwxApIpYi2OdsqzzDk9uhOC21unkeL
+\unrestrict FLLsxbOXXQwLijUEP1X9mXYFpM8TU2Unf5E2GdT4CU0zcMe1resf9AaEq6fKIBH
 

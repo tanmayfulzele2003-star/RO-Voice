@@ -24,6 +24,7 @@ from audiocall.api.schemas import (
 from audiocall.core.config import (
     CALL_RATE_LIMIT_MAX,
     CALL_RATE_LIMIT_WINDOW_SECONDS,
+    MAX_CONCURRENT_CALLS,
     SERVER_HOST,
     WS_SCHEME,
 )
@@ -51,6 +52,11 @@ async def start_call(
 ) -> CallStartResponse:
     """Place a real outbound phone call through Twilio."""
     _enforce_rate_limit(admin_username)
+    if await calls_service.count_active_phone_calls() >= MAX_CONCURRENT_CALLS:
+        raise HTTPException(
+            status_code=429,
+            detail=f"All {MAX_CONCURRENT_CALLS} call lines are busy — try again when a call ends.",
+        )
 
     try:
         call = await calls_service.start_outbound_call(payload.customer_id)
@@ -96,6 +102,8 @@ async def list_calls(
     outcome: str | None = Query(default=None, description=f"One of: {', '.join(OUTCOMES)}"),
     channel: str | None = Query(default=None, description="phone | browser"),
     profile_id: uuid.UUID | None = Query(default=None),
+    direction: str | None = Query(default=None, description="outbound | inbound"),
+    campaign_id: uuid.UUID | None = Query(default=None),
 ) -> Paginated[CallListItem]:
     rows, total = await calls_service.list_calls(
         limit=limit,
@@ -109,6 +117,8 @@ async def list_calls(
         outcome=outcome,
         channel=channel,
         profile_id=profile_id,
+        direction=direction,
+        campaign_id=campaign_id,
     )
     profile_names = await calls_service.profile_names()
     items = [
@@ -120,6 +130,10 @@ async def list_calls(
             profile_name=profile_names.get(call.profile_id),
             direction=call.direction,
             channel=call.channel,
+            from_number=call.from_number,
+            to_number=call.to_number,
+            campaign_id=call.campaign_id,
+            transferred_to=call.transferred_to,
             status=call.status,
             outcome=call.outcome,
             lead_status=summary.lead_status if summary else None,
@@ -161,6 +175,10 @@ async def get_call_detail(call_id: uuid.UUID) -> CallDetailOut:
         twilio_call_sid=call.twilio_call_sid,
         direction=call.direction,
         channel=call.channel,
+        from_number=call.from_number,
+        to_number=call.to_number,
+        campaign_id=call.campaign_id,
+        transferred_to=call.transferred_to,
         status=call.status,
         outcome=call.outcome,
         start_time=call.start_time,

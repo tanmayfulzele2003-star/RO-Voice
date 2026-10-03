@@ -25,6 +25,13 @@ def _validate_phone(value: str | None) -> str | None:
     return phone
 
 
+def _validate_optional_phone(value: str | None) -> str | None:
+    """Like _validate_phone, but a blank value clears the field."""
+    if value is None or not value.strip():
+        return None
+    return _validate_phone(value)
+
+
 class Paginated(BaseModel, Generic[T]):
     items: list[T]
     total: int
@@ -71,9 +78,13 @@ class ProfileBase(BaseModel):
     greeting: str | None = Field(default=None, max_length=1000)
     language: str | None = Field(default=None, max_length=50)
     fields: list[ProfileField] = Field(min_length=1, max_length=30)
+    transfer_number: str | None = Field(
+        default=None, max_length=32, description=f"Human hand-off number. {_PHONE_HELP}"
+    )
     is_default: bool = False
 
     _validate_fields = field_validator("fields")(_check_fields)
+    _transfer = field_validator("transfer_number")(_validate_optional_phone)
 
 
 class ProfileCreate(ProfileBase):
@@ -90,9 +101,11 @@ class ProfileUpdate(BaseModel):
     greeting: str | None = Field(default=None, max_length=1000)
     language: str | None = Field(default=None, max_length=50)
     fields: list[ProfileField] | None = Field(default=None, min_length=1, max_length=30)
+    transfer_number: str | None = Field(default=None, max_length=32)
     is_default: bool | None = None
 
     _validate_fields = field_validator("fields")(_check_fields)
+    _transfer = field_validator("transfer_number")(_validate_optional_phone)
 
 
 class ProfileOut(BaseModel):
@@ -108,6 +121,7 @@ class ProfileOut(BaseModel):
     greeting: str | None
     language: str | None
     fields: list[ProfileField]
+    transfer_number: str | None
     is_default: bool
     created_at: datetime
 
@@ -173,6 +187,10 @@ class CallListItem(BaseModel):
     profile_name: str | None
     direction: str
     channel: str
+    from_number: str | None
+    to_number: str | None
+    campaign_id: uuid.UUID | None
+    transferred_to: str | None
     status: str
     outcome: str | None
     lead_status: str | None
@@ -241,6 +259,10 @@ class CallDetailOut(BaseModel):
     twilio_call_sid: str | None
     direction: str
     channel: str
+    from_number: str | None
+    to_number: str | None
+    campaign_id: uuid.UUID | None
+    transferred_to: str | None
     status: str
     outcome: str | None
     start_time: datetime | None
@@ -252,6 +274,94 @@ class CallDetailOut(BaseModel):
     events: list[CallEventOut]
     requirements: RequirementsOut | None
     summary: CallSummaryOut | None
+
+
+# ── Phone numbers ────────────────────────────────────────────────────────────
+class PhoneNumberCreate(BaseModel):
+    number: str = Field(min_length=1, max_length=32, description=_PHONE_HELP)
+    label: str | None = Field(default=None, max_length=100)
+    profile_id: uuid.UUID | None = Field(default=None, description="null = shared pool")
+    inbound_enabled: bool = True
+    outbound_enabled: bool = True
+    is_active: bool = True
+
+    _phone = field_validator("number")(_validate_phone)
+
+
+class PhoneNumberUpdate(BaseModel):
+    number: str | None = Field(default=None, min_length=1, max_length=32)
+    label: str | None = Field(default=None, max_length=100)
+    profile_id: uuid.UUID | None = None
+    inbound_enabled: bool | None = None
+    outbound_enabled: bool | None = None
+    is_active: bool | None = None
+
+    _phone = field_validator("number")(_validate_phone)
+
+
+class PhoneNumberOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    number: str
+    label: str | None
+    profile_id: uuid.UUID | None
+    inbound_enabled: bool
+    outbound_enabled: bool
+    is_active: bool
+    last_used_at: datetime | None
+    created_at: datetime
+
+
+# ── Campaigns ────────────────────────────────────────────────────────────────
+class CampaignCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    profile_id: uuid.UUID | None = Field(
+        default=None, description="null = each customer's own profile"
+    )
+    customer_ids: list[uuid.UUID] = Field(min_length=1, max_length=5000)
+    max_concurrent: int = Field(default=3, ge=1, le=50)
+    max_attempts: int = Field(default=2, ge=1, le=5)
+    retry_delay_minutes: int = Field(default=30, ge=1, le=1440)
+
+
+class CampaignCounts(BaseModel):
+    pending: int = 0
+    dialing: int = 0
+    completed: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    total: int = 0
+
+
+class CampaignOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    profile_id: uuid.UUID | None
+    status: str
+    max_concurrent: int
+    max_attempts: int
+    retry_delay_minutes: int
+    started_at: datetime | None
+    completed_at: datetime | None
+    created_at: datetime
+    counts: CampaignCounts
+
+
+class CampaignContactOut(BaseModel):
+    id: uuid.UUID
+    customer_id: uuid.UUID
+    customer_name: str
+    customer_phone: str
+    status: str
+    attempts: int
+    last_call_id: uuid.UUID | None
+    last_outcome: str | None
+    next_attempt_at: datetime | None
+
+
+class CampaignDetailOut(CampaignOut):
+    contacts: list[CampaignContactOut]
 
 
 # ── Stats ────────────────────────────────────────────────────────────────────

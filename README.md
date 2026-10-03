@@ -2,13 +2,21 @@
 
 An AI calling agent that **places an outbound call itself, holds a natural two-way voice
 conversation, keeps context, collects the information it needs, decides when the call is done, and
-hands everything to an admin dashboard**. No human operator is involved at any point.
+hands everything to an admin dashboard**. No human operator is needed. When a caller wants one,
+the agent can hand the call to a real person.
 
 * **Calling:** a real phone call through Twilio, or a **browser (WebRTC) call** from the dashboard
   when a free or trial telephony plan can't reach the number. Both channels share the same agent.
+* **Several numbers, inbound and outbound:** a pool of Twilio numbers. Each can belong to a
+  business, outbound calls take turns across them, and people who call a number reach that
+  business's agent.
+* **Many calls at once:** campaigns dial a customer list in parallel, within a concurrency limit,
+  and retry unanswered calls.
+* **Transfer to a person:** the agent hands the live call to a profile's transfer number with a
+  spoken summary, and falls back to "we'll call you back" if nobody answers.
 * **Agentic AI:** a Google ADK agent on Gemini Live with tools (`save_customer_info`,
-  `get_call_progress`, `end_call`). It tracks a checklist, asks only for what's missing, and makes its
-  own lead assessment.
+  `get_call_progress`, `end_call`, `transfer_to_human`). It tracks a checklist, asks only for
+  what's missing, and makes its own lead assessment.
 * **Any business:** the agent is configured by **business profiles** (persona, products, call
   objective, fields to collect), which you edit in the dashboard. RO water systems is the seeded
   default; add a hotel, solar, insurance or clinic profile without touching code.
@@ -135,8 +143,14 @@ Open `http://localhost:3000` and sign in with the admin you created.
    TWILIO_PHONE_NUMBER=+1...           # your Twilio number, E.164
    ```
 6. Restart the backend. You don't need to set a webhook on the Twilio number for outbound calls,
-   because the backend passes the `/voice` and `/call-status` URLs to Twilio with each call. For
-   inbound calls, set the number's "A call comes in" webhook to `https://<host>/voice` (POST).
+   because the backend passes the `/voice` and `/call-status` URLs to Twilio with each call.
+7. **More numbers and inbound calls (optional):** in **Phone numbers**, add each Twilio number you
+   own, assign it to a business profile (or leave it in the shared pool), and click **Sync to
+   Twilio**. That points the number's *A call comes in* webhook at `/voice`, so people who call it
+   reach the agent for that business. Outbound calls take turns across a profile's numbers.
+8. **Transfer to a person (optional):** set **Transfer number** on a business profile. On phone
+   calls the agent can then hand the caller to that number. The person hears a one-line summary
+   first, and if nobody answers, the caller is told the team will call back.
 
 ### 8. Start a test call
 
@@ -154,6 +168,9 @@ Open `http://localhost:3000` and sign in with the admin you created.
    back a summary, says goodbye and hangs up.
 5. **Calls** shows the call with status, outcome, transcript, collected requirements, the AI
    summary and an event timeline.
+6. **Many calls at once:** in **Campaigns → New campaign**, pick customers, a concurrency limit and
+   retries, then **Start**. The dialer calls them in parallel (within `MAX_CONCURRENT_CALLS`) and
+   retries the ones who didn't answer.
 
 ### Tests
 
@@ -283,6 +300,13 @@ sequenceDiagram
     B->>B: post-call AI analysis → summary, requirements, outcome
 ```
 
+**Inbound calls** follow the same path from `POST /voice` onwards. The dialled number (`To`) picks
+the business profile, and the agent answers ("thanks for calling…") instead of pitching.
+**Campaign calls** are the same `calls.create` placed by the background dialer. **Transfers:**
+when the agent calls `transfer_to_human`, the bridge waits for its "connecting you" line to play,
+then redirects the live call to `<Dial>` the profile's transfer number. See
+[ARCHITECTURE.md](ARCHITECTURE.md#telephony-numbers-inbound-calls-campaigns-and-human-transfer).
+
 The **browser call** is identical except the dashboard plays Twilio's role.
 `POST /api/calls/browser` returns a short-lived signed token, and the page streams 16 kHz PCM from
 the microphone over `WS /browser-stream` and plays the agent's 24 kHz PCM back.
@@ -305,6 +329,9 @@ detail page as a timeline.
 | Speech-recognition failure | Sustained speech energy with no transcription → `speech_not_recognized` event, and the agent asks the customer to repeat |
 | AI / API failure | The customer hears an apology ("we'll call you back") instead of dead air, then the call ends. Status `failed`, reason `ai_error`. Post-call analysis is retried once, and its failure is logged without losing the agent's verdict |
 | Call runs too long | The agent wraps up at `MAX_CALL_SECONDS` (default 600 s) |
+| Every line busy | Manual calls get a 429. The campaign dialer waits for a free line. Inbound callers go straight to the transfer number, or hear "all lines are busy" (`capacity`) |
+| Transfer not answered | The caller hears "we'll call you back". A `transfer_failed` event is logged and the outcome is set to `callback` |
+| Campaign call unanswered / failed | Retried after `retry_delay_minutes` until `max_attempts`, then the contact is marked `failed` |
 
 ## API documentation
 
@@ -318,12 +345,18 @@ need the admin session cookie.
 | `GET` / `PATCH` / `DELETE` | `/api/profiles/{id}` | Read / edit / delete a profile (the default or an in-use profile can't be deleted) |
 | `GET` / `POST` | `/api/customers` | List (paginated) / create customers (`name, phone, company, purpose, product, profile_id`) |
 | `GET` / `PATCH` | `/api/customers/{id}` | Read / edit a customer |
-| `POST` | `/api/calls` | **Start a phone call** via Twilio (rate-limited 5/min) |
+| `POST` | `/api/calls` | **Start a phone call** via Twilio (rate-limited 5/min, and capped by `MAX_CONCURRENT_CALLS`) |
 | `POST` | `/api/calls/browser` | **Start a browser call**. Returns `call_id`, `token`, `stream_url` |
-| `GET` | `/api/calls` | Call list. Filters: `status, lead_status, outcome, follow_up, channel, profile_id, customer_name, date_from, date_to`, plus `limit/offset` |
+| `GET` | `/api/calls` | Call list. Filters: `status, lead_status, outcome, follow_up, channel, direction, campaign_id, profile_id, customer_name, date_from, date_to`, plus `limit/offset` |
 | `GET` | `/api/calls/{id}` | Call detail: info, transcript, events, requirements (labelled by profile), AI summary |
+| `GET` / `POST` | `/api/numbers` | List / register phone numbers (`number, label, profile_id, inbound_enabled, outbound_enabled, is_active`) |
+| `PATCH` / `DELETE` | `/api/numbers/{id}` | Edit / remove a number |
+| `POST` | `/api/numbers/{id}/sync-twilio` | Point the Twilio number's webhooks at this server |
+| `GET` / `POST` | `/api/campaigns` | List / create campaigns (`name, customer_ids, profile_id, max_concurrent, max_attempts, retry_delay_minutes`) |
+| `GET` / `DELETE` | `/api/campaigns/{id}` | Campaign with per-contact progress / delete a finished campaign |
+| `POST` | `/api/campaigns/{id}/start` · `/pause` · `/cancel` | Control the dialer for a campaign |
 | `GET` | `/api/stats/overview` | Total / completed / failed calls, interested leads, follow-ups, average duration |
-| `POST` | `/voice` · `/call-status` | Twilio webhooks (signature-validated) |
+| `POST` | `/voice` · `/call-status` · `/transfer-status` · `/transfer-whisper` | Twilio webhooks (signature-validated) |
 | `WS` | `/stream` | Twilio Media Stream ↔ agent |
 | `WS` | `/browser-stream?call_id&token` | Browser microphone ↔ agent |
 | `POST` | `/call` | Legacy manual-test endpoint (unauthenticated; don't expose publicly) |
@@ -347,9 +380,11 @@ Alembic migrations in `backend/alembic/versions/` are the source of truth.
 
 | Table | Holds |
 |---|---|
-| `business_profiles` | Agent configuration per business: name, persona, products, objective, greeting, language, `fields` (JSONB checklist), `is_default` |
+| `business_profiles` | Agent configuration per business: name, persona, products, objective, greeting, language, `fields` (JSONB checklist), `transfer_number`, `is_default` |
+| `phone_numbers` | Twilio number pool: number, label, profile, inbound/outbound switches, `last_used_at` (round-robin) |
+| `campaigns` / `campaign_contacts` | Batch calls: concurrency, retries, status; one row per customer with attempts and last outcome |
 | `customers` | name, phone (E.164), company, purpose, product, `profile_id` |
-| `calls` | customer, profile, Twilio SID, direction, **channel** (phone/browser), status, start/end time, duration, error reason, **outcome** |
+| `calls` | customer, profile, Twilio SID, direction, **channel** (phone/browser), from/to number, campaign, `transferred_to`, status, start/end time, duration, error reason, **outcome** |
 | `conversation_messages` | One row per turn: speaker (`customer`/`ai`), message, timestamp |
 | `call_events` | Event log: provider errors, silences, interruptions, fields collected, AI errors, … |
 | `requirements` | Collected fields (`fields` JSONB keyed by the profile's field keys, plus fixed RO columns) |
@@ -387,7 +422,8 @@ which one:
 ## Future improvements
 
 * Retry and reconnect for the Gemini Live session (session resumption) instead of ending the call
-* Scheduled campaigns: call lists, calling windows, automatic retries for `no_answer` / `callback`
+* Campaign calling windows (time zones, "don't call after 8 pm") and a scheduled start time
+* Ring groups / queues for transfers (several people, hold music) via Twilio TaskRouter
 * Twilio answering-machine detection to leave a voicemail instead of talking to one
 * Per-profile voice selection, and a knowledge base (RAG) for product and pricing questions
 * Call recording storage with playback in the dashboard

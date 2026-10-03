@@ -16,8 +16,11 @@ Outbound (ADK → Twilio) :  PCM-16 24 kHz →  μ-law 8 kHz
 Endpoints
 ---------
 POST /call           – Initiate an outbound call via Twilio REST API (legacy/manual)
-POST /voice          – Twilio voice webhook; returns TwiML <Connect><Stream>
+POST /voice          – Twilio voice webhook; returns TwiML <Connect><Stream>.
+                       Inbound calls are routed by the dialled number (To).
 POST /call-status    – Twilio status callback (ringing / answered / no-answer / ...)
+POST /transfer-whisper – played to the human before a transferred call connects
+POST /transfer-status  – <Dial> result of a transfer; falls back if unanswered
 WS   /stream         – Twilio Media Stream ↔ agent (phone channel)
 WS   /browser-stream – Browser microphone ↔ agent (WebRTC demo channel)
 
@@ -32,7 +35,6 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from xml.sax.saxutils import quoteattr
 
 from dotenv import load_dotenv
 
@@ -45,17 +47,26 @@ from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import Response  # noqa: E402
 from pydantic import BaseModel  # noqa: E402
 
+from audiocall import dialer  # noqa: E402
 from audiocall.api import api_router  # noqa: E402
 from audiocall.core.config import (  # noqa: E402
     FRONTEND_ORIGIN,
     HTTP_SCHEME,
+    MAX_CONCURRENT_CALLS,
     SERVER_HOST,
+    TRANSFER_RING_TIMEOUT_SECONDS,
     TWILIO_VALIDATE_SIGNATURE,
     WS_SCHEME,
 )
 from audiocall.core.security import verify_stream_token, verify_twilio_signature  # noqa: E402
 from audiocall.db.session import check_connectivity  # noqa: E402
-from audiocall.services import calls_service, events_service  # noqa: E402
+from audiocall.services import (  # noqa: E402
+    calls_service,
+    events_service,
+    numbers_service,
+    profiles_service,
+    telephony,
+)
 from audiocall.voice.bridge import CallBridge  # noqa: E402
 from audiocall.voice.transports import BrowserTransport, TwilioTransport  # noqa: E402
 
@@ -84,7 +95,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # rather than surfacing a confusing error on the first request that needs it.
     await check_connectivity()
     logger.info("Database connectivity verified")
-    yield
+    dialer_task = dialer.start()
+    try:
+        yield
+    finally:
+        await dialer.stop(dialer_task)
 
 
 app = FastAPI(title="Twilio + Google ADK Voice Agent", lifespan=lifespan)
@@ -201,7 +216,7 @@ async def voice_webhook(request: Request) -> Response:
     Called by Twilio when the call is answered (outbound) or received
     (inbound). Returns TwiML that instructs Twilio to open a bidirectional
     media stream to our /stream WebSocket endpoint, with our `calls.id`
-    threaded through as a query param so /stream knows which row to write to.
+    threaded through so /stream knows which row to write to.
     """
     call_id_param = request.query_params.get("call_id")
     form = await request.form()
@@ -209,7 +224,7 @@ async def voice_webhook(request: Request) -> Response:
     twilio_call_sid = str(form.get("CallSid", ""))
 
     if call_id_param:
-        # Outbound call: /call already created the `calls` row.
+        # Outbound call: start_outbound_call already created the `calls` row.
         try:
             call_id = uuid.UUID(call_id_param)
         except ValueError as exc:
@@ -217,42 +232,72 @@ async def voice_webhook(request: Request) -> Response:
         if twilio_call_sid:
             await calls_service.set_twilio_sid(call_id, twilio_call_sid)
     else:
-        # Inbound call: nothing created a `calls` row yet — do it now,
-        # looking up (or creating) the customer by their caller ID.
-        from_number = str(form.get("From", ""))
-        customer = await calls_service.get_or_create_customer_by_phone(from_number)
-        call = await calls_service.create_call(customer.id, direction="inbound")
-        call_id = call.id
-        if twilio_call_sid:
-            await calls_service.set_twilio_sid(call_id, twilio_call_sid)
-        logger.info(
-            "Inbound call: call_id=%s  SID=%s  from=%s",
-            call_id,
-            twilio_call_sid,
-            from_number,
-        )
+        twiml_or_call_id = await _route_inbound_call(form, twilio_call_sid)
+        if isinstance(twiml_or_call_id, str):
+            return Response(content=twiml_or_call_id, media_type="application/xml")
+        call_id = twiml_or_call_id
 
     stream_url = f"{WS_SCHEME}://{SERVER_HOST}/stream?call_id={call_id}"
-
-    # Twilio's Media Stream client doesn't reliably preserve the query string
-    # on the WSS URL when it opens the actual connection (observed directly:
-    # the URL logged below has ?call_id=..., but /stream's query_params come
-    # back empty on the real Twilio-originated socket). <Parameter> is the
-    # documented reliable channel — it's echoed back verbatim in the "start"
-    # event's customParameters, so /stream falls back to reading it from
-    # there when the query param didn't make it through.
-    twiml = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        "<Response>"
-        "<Connect>"
-        f"<Stream url={quoteattr(stream_url)}>"
-        f'<Parameter name="call_id" value="{call_id}"/>'
-        "</Stream>"
-        "</Connect>"
-        "</Response>"
-    )
     logger.info("Twilio voice webhook hit; directing stream to %s", stream_url)
-    return Response(content=twiml, media_type="application/xml")
+    return Response(
+        content=telephony.stream_twiml(stream_url, call_id), media_type="application/xml"
+    )
+
+
+async def _route_inbound_call(form, twilio_call_sid: str) -> uuid.UUID | str:  # noqa: ANN001
+    """Inbound call: nothing created a `calls` row yet. Route by the number
+    that was dialled (To) and return the new call_id — or TwiML to answer
+    with directly (number switched off, every line busy)."""
+    from_number = str(form.get("From", ""))
+    to_number = str(form.get("To", ""))
+    number = await numbers_service.get_by_number(to_number) if to_number else None
+    if number is not None and not (number.is_active and number.inbound_enabled):
+        logger.info("Inbound call to disabled number %s rejected", to_number)
+        return telephony.say_and_hangup(telephony.NUMBER_DISABLED_MESSAGE)
+
+    customer = await calls_service.get_or_create_customer_by_phone(from_number)
+    # The business that was dialled answers; otherwise the customer's own.
+    profile = await profiles_service.resolve_profile(
+        (number.profile_id if number else None) or customer.profile_id
+    )
+    busy = await calls_service.count_active_phone_calls() >= MAX_CONCURRENT_CALLS
+    call = await calls_service.create_call(
+        customer.id,
+        direction="inbound",
+        profile_id=profile.id,
+        from_number=from_number,
+        to_number=to_number,
+        phone_number_id=number.id if number else None,
+    )
+    if twilio_call_sid:
+        await calls_service.set_twilio_sid(call.id, twilio_call_sid)
+    logger.info(
+        "Inbound call: call_id=%s  SID=%s  from=%s  to=%s  profile=%s",
+        call.id,
+        twilio_call_sid,
+        from_number,
+        to_number,
+        profile.name,
+    )
+
+    if busy:
+        # Every AI line is taken: go straight to a person if there is one.
+        if profile.transfer_number:
+            await events_service.record(
+                call.id, "capacity_transfer", f"all {MAX_CONCURRENT_CALLS} lines busy"
+            )
+            await calls_service.mark_capacity_transfer(call.id, profile.transfer_number)
+            return telephony.dial_twiml(
+                profile.transfer_number,
+                caller_id=to_number or None,
+                timeout_seconds=TRANSFER_RING_TIMEOUT_SECONDS,
+                action_url=f"{HTTP_SCHEME}://{SERVER_HOST}/transfer-status?call_id={call.id}",
+                announcement="Please hold while we connect you to our team.",
+            )
+        await events_service.record(call.id, "capacity_busy", f"all {MAX_CONCURRENT_CALLS} lines busy")
+        await calls_service.set_status(call.id, "failed", error_reason="capacity")
+        return telephony.say_and_hangup(telephony.BUSY_MESSAGE)
+    return call.id
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +325,12 @@ async def call_status_webhook(request: Request) -> Response:
     if twilio_call_sid:
         call = await calls_service.get_call_by_twilio_sid(twilio_call_sid)
         if call is not None:
-            if our_status == "completed" and call.start_time is None:
+            if (
+                our_status == "completed"
+                and call.start_time is None
+                and call.transferred_to is None  # went straight to a person
+                and call.error_reason != "capacity"  # answered with "lines busy"
+            ):
                 # Answered, but our audio stream never connected: the customer
                 # never heard the agent. Usual causes: Twilio trial disclaimer
                 # ("press any key") not answered, or /voice//stream unreachable.
@@ -304,6 +354,49 @@ async def call_status_webhook(request: Request) -> Response:
         our_status,
     )
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Human transfer webhooks
+# ---------------------------------------------------------------------------
+def _call_id_param(request: Request) -> uuid.UUID:
+    try:
+        return uuid.UUID(request.query_params.get("call_id", ""))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid call_id") from exc
+
+
+@app.post("/transfer-whisper")
+async def transfer_whisper_webhook(request: Request) -> Response:
+    """Played only to the person taking a transferred call, when they pick
+    up and before the customer is connected: who's calling and why."""
+    form = await request.form()
+    _verify_twilio_webhook(request, dict(form))
+    name, summary = await calls_service.transfer_context(_call_id_param(request))
+    return Response(content=telephony.whisper_twiml(name, summary), media_type="application/xml")
+
+
+@app.post("/transfer-status")
+async def transfer_status_webhook(request: Request) -> Response:
+    """The <Dial> to a person has ended. Answered: the conversation happened,
+    hang up. Not answered: apologise, promise a callback, and record it."""
+    form = await request.form()
+    _verify_twilio_webhook(request, dict(form))
+    call_id = _call_id_param(request)
+    dial_status = str(form.get("DialCallStatus", ""))
+    if dial_status in ("completed", "answered"):
+        duration = form.get("DialCallDuration")
+        await events_service.record(
+            call_id, "transfer_answered", f"talked to a person for {duration}s" if duration else None
+        )
+        return Response(content=telephony.hangup(), media_type="application/xml")
+
+    await events_service.record(call_id, "transfer_failed", f"dial status: {dial_status or 'unknown'}")
+    await calls_service.set_outcome(call_id, "callback")
+    return Response(
+        content=telephony.say_and_hangup(telephony.TRANSFER_FAILED_MESSAGE),
+        media_type="application/xml",
+    )
 
 
 # ---------------------------------------------------------------------------

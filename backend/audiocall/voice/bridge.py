@@ -8,14 +8,17 @@ Per call it:
      session whose state carries them (the agent's instructions and tools read
      it — see agent.py);
   2. tells the agent to open the conversation (outbound calls: the agent
-     speaks first, nobody has to say "hello");
+     speaks first, nobody has to say "hello"; inbound calls: it answers);
   3. streams audio both ways, with barge-in (customer interrupts → buffered
      agent audio is dropped);
   4. persists every finished turn of the transcript;
   5. watches for silence, unrecognised speech, AI failure, the call running
      too long, and the agent's own `end_call` decision — recording each as a
      call event and reacting (nudge, apologise, hang up);
-  6. on teardown, flushes pending writes, records the final status and lets
+  6. hands the call to a person when the agent calls `transfer_to_human`:
+     once its "connecting you" line has played, the live Twilio call is
+     redirected to a <Dial> (see services/telephony.py);
+  7. on teardown, flushes pending writes, records the final status and lets
      post-call analysis run.
 """
 
@@ -37,7 +40,8 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from audiocall.agent import root_agent
+from audiocall.agent import root_agent, transfer_available
+from audiocall.core import config
 from audiocall.core.config import (
     INTERRUPTION_THRESHOLD,
     MAX_CALL_SECONDS,
@@ -48,6 +52,7 @@ from audiocall.services import (
     calls_service,
     events_service,
     requirements_service,
+    telephony,
     transcript_service,
 )
 from audiocall.voice.transports import Inbound
@@ -80,6 +85,7 @@ class Transport(Protocol):
     async def notify(self, payload: dict) -> None: ...
     async def hang_up(self) -> None: ...
     async def abort(self, message: str = ...) -> None: ...
+    async def transfer(self, twiml: str) -> bool: ...
 
 
 def _system(text: str) -> types.Content:
@@ -101,12 +107,18 @@ class CallBridge:
         self.silence_timeout = False
         self.interruptions = 0
         self.customer_hung_up = False
+        self.line_closed = False  # the far end hung up, whoever ended the call
 
         # Ending
         self.end_requested = False
         self.end_reason: str | None = None
         self.agent_assessment: dict | None = None
         self._fallback_task: asyncio.Task | None = None
+
+        # Human transfer
+        self.state: dict[str, Any] = {}
+        self.transfer_requested = False
+        self.transferred_to: str | None = None
 
         # Silence / speech-recognition tracking
         self.started_at = time.monotonic()
@@ -168,6 +180,7 @@ class CallBridge:
             "collected": {},
             **(context or {}),
         }
+        self.state = state
         session_id = str(uuid.uuid4())
         await session_service.create_session(
             app_name=APP_NAME, user_id="customer", session_id=session_id, state=state
@@ -179,13 +192,19 @@ class CallBridge:
             if state["collected"]:
                 self._bg(requirements_service.save_fields(self.call_id, state["collected"]))
 
-        # Outbound call: the agent opens the conversation.
-        self.queue.send_content(
-            _system(
+        # The agent speaks first either way: it opens an outbound call, and
+        # answers an inbound one.
+        if state.get("direction") == "inbound":
+            opening = (
+                "A customer has just called in and is on the line. Answer now: thank them "
+                "for calling and ask how you can help."
+            )
+        else:
+            opening = (
                 "The call has just connected and the customer is on the line. "
                 "Start the conversation now with your greeting."
             )
-        )
+        self.queue.send_content(_system(opening))
 
         tasks = [
             asyncio.create_task(self._upstream()),
@@ -210,6 +229,7 @@ class CallBridge:
                     if item.name == HANGUP_MARK and self.end_requested:
                         self.done.set()
                 elif item.kind == "hangup":
+                    self.line_closed = True
                     if not self.end_requested:
                         self.customer_hung_up = True
                         self._event("customer_hung_up")
@@ -316,6 +336,11 @@ class CallBridge:
                 args = dict(call.args or {})
                 self.agent_assessment = args
                 self.request_end(str(args.get("reason") or "agent ended call"))
+            elif call.name == "transfer_to_human" and transfer_available(self.state):
+                # Same as end_call: let the "connecting you" line play out,
+                # then teardown redirects the call instead of hanging up.
+                self.transfer_requested = True
+                self.request_end("transferred")
 
         # Barge-in: the customer started talking over the agent.
         if event.interrupted:
@@ -402,6 +427,9 @@ class CallBridge:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
+        if self.transfer_requested and self.ai_error is None and not self.line_closed:
+            await self._transfer()
+
         # Persist the final state BEFORE closing the line: once the socket
         # closes, the server may cancel this handler. Shielded so that a
         # cancellation mid-write can't leave the call stuck "in_progress".
@@ -414,6 +442,31 @@ class CallBridge:
             if self.ai_error is None:
                 await self.t.hang_up()
         logger.info("Call %s bridge closed", self.call_id)
+
+    async def _transfer(self) -> None:
+        """Redirect the live call to the profile's transfer number. Must run
+        while our end of the media stream is still open: if the socket closed
+        first, Twilio would run out of TwiML and hang up on the customer."""
+        number = (self.state.get("profile") or {}).get("transfer_number")
+        if not number or self.call_id is None:
+            return
+        base = f"{config.HTTP_SCHEME}://{config.SERVER_HOST}"
+        twiml = telephony.dial_twiml(
+            number,
+            caller_id=telephony.business_number(
+                self.state.get("direction"), self.state.get("from_number"), self.state.get("to_number")
+            )
+            or config.TWILIO_PHONE_NUMBER
+            or None,
+            timeout_seconds=config.TRANSFER_RING_TIMEOUT_SECONDS,
+            action_url=f"{base}/transfer-status?call_id={self.call_id}",
+            whisper_url=f"{base}/transfer-whisper?call_id={self.call_id}",
+        )
+        if await self.t.transfer(twiml):
+            self.transferred_to = number
+            self._event("transfer_started", f"dialling {number}")
+        else:
+            self._event("transfer_failed", "could not redirect the call to a person")
 
     async def _finalize(self) -> None:
         # Flush transcript/event writes still in flight before recording the
@@ -434,6 +487,8 @@ class CallBridge:
             error_reason = "excessive_interruptions"
         elif self.customer_hung_up and not self.end_requested:
             error_reason = "customer_hung_up"
+        if self.transferred_to is not None:
+            error_reason = None  # the conversation continues with a person
         if self.t.channel == "browser" and not self.ai_error:
             status_override = "completed"  # no telephony provider to report it
 
@@ -453,4 +508,5 @@ class CallBridge:
             datetime.now(timezone.utc),
             status_override=status_override,
             error_reason=error_reason,
+            transferred_to=self.transferred_to,
         )

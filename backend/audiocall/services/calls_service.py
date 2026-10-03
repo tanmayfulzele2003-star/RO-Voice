@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from xml.sax.saxutils import escape as xml_escape
 
@@ -24,7 +24,7 @@ from audiocall.core import config
 from audiocall.db.models import Call, CallSummary, Customer
 from audiocall.db.session import get_session_factory
 from audiocall.phone import is_valid_e164
-from audiocall.services import events_service, profiles_service
+from audiocall.services import events_service, numbers_service, profiles_service
 from audiocall.services.outcome import outcome_from_analysis, outcome_from_status
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,8 @@ _TWILIO_STATUS_MAP = {
 }
 
 _TERMINAL_STATUSES = {"completed", "failed", "no_answer", "disconnected"}
+TERMINAL_STATUSES = frozenset(_TERMINAL_STATUSES)
+_ACTIVE_STATUSES = ("queued", "ringing", "in_progress")
 
 # Twilio REST error codes -> (event_type, admin-facing explanation). These are
 # the usual reasons an outbound call is rejected before the phone ever rings —
@@ -68,7 +70,12 @@ class CustomerNotFound(Exception):
 
 
 class TwilioCallFailed(Exception):
-    """Raised when Twilio rejects/fails an outbound call creation request."""
+    """Raised when Twilio rejects/fails an outbound call creation request.
+    `call_id` is the (now failed) call row, so callers can link to it."""
+
+    def __init__(self, reason: str, call_id: uuid.UUID | None = None) -> None:
+        super().__init__(reason)
+        self.call_id = call_id
 
 
 def map_twilio_status(twilio_status: str) -> str:
@@ -146,6 +153,11 @@ async def create_call(
     direction: str,
     channel: str = "phone",
     profile_id: uuid.UUID | None = None,
+    *,
+    from_number: str | None = None,
+    to_number: str | None = None,
+    phone_number_id: uuid.UUID | None = None,
+    campaign_id: uuid.UUID | None = None,
 ) -> Call:
     async with get_session_factory()() as session:
         call = Call(
@@ -154,11 +166,63 @@ async def create_call(
             channel=channel,
             profile_id=profile_id,
             status="queued",
+            from_number=from_number,
+            to_number=to_number,
+            phone_number_id=phone_number_id,
+            campaign_id=campaign_id,
         )
         session.add(call)
         await session.commit()
         await session.refresh(call)
         return call
+
+
+def active_call_window() -> timedelta:
+    """A phone call older than this can't still be live (ring timeout + max
+    conversation + slack): a row stuck non-terminal past it, e.g. after a
+    lost status callback or a server restart, no longer holds a line."""
+    return timedelta(seconds=config.RING_TIMEOUT_SECONDS + config.MAX_CALL_SECONDS + 120)
+
+
+async def count_active_phone_calls() -> int:
+    """Phone calls currently holding a line (manual, campaign and inbound)."""
+    cutoff = datetime.now(timezone.utc) - active_call_window()
+    async with get_session_factory()() as session:
+        return (
+            await session.scalar(
+                select(func.count())
+                .select_from(Call)
+                .where(
+                    Call.channel == "phone",
+                    Call.status.in_(_ACTIVE_STATUSES),
+                    Call.created_at >= cutoff,
+                    # Handed to a person: the line is up but no AI session is used.
+                    Call.transferred_to.is_(None),
+                )
+            )
+            or 0
+        )
+
+
+async def set_outcome(call_id: uuid.UUID, outcome: str) -> None:
+    async with get_session_factory()() as session:
+        call = await session.get(Call, call_id)
+        if call is None:
+            return
+        call.outcome = outcome
+        await session.commit()
+
+
+async def mark_capacity_transfer(call_id: uuid.UUID, number: str) -> None:
+    """Inbound call sent straight to a person because every AI line was busy."""
+    async with get_session_factory()() as session:
+        call = await session.get(Call, call_id)
+        if call is None:
+            return
+        call.transferred_to = number
+        call.outcome = "transferred"
+        call.error_reason = "capacity"
+        await session.commit()
 
 
 async def set_twilio_sid(call_id: uuid.UUID, twilio_call_sid: str) -> None:
@@ -194,8 +258,8 @@ async def set_status_by_twilio_sid(
         call = result.scalar_one_or_none()
         if call is None:
             return
-        if call.status == "failed" and status != "failed" and call.error_reason == "ai_error":
-            # Our own AI-failure verdict outranks Twilio's later "completed".
+        if call.status == "failed" and status != "failed" and call.error_reason in ("ai_error", "capacity"):
+            # Our own failure verdict outranks Twilio's later "completed".
             return
         call.status = status
         if error_reason is not None:
@@ -220,7 +284,11 @@ async def mark_stream_ended(
     end_time: datetime,
     status_override: str | None = None,
     error_reason: str | None = None,
+    transferred_to: str | None = None,
 ) -> None:
+    """The AI's part of the call is over. With `transferred_to`, the call
+    itself goes on with a person: it stays `in_progress` until Twilio's final
+    status callback, and the outcome is `transferred`."""
     async with get_session_factory()() as session:
         call = await session.get(Call, call_id)
         if call is None:
@@ -228,7 +296,10 @@ async def mark_stream_ended(
         call.end_time = end_time
         if call.start_time is not None:
             call.duration_seconds = int((end_time - call.start_time).total_seconds())
-        if status_override is not None:
+        if transferred_to is not None:
+            call.transferred_to = transferred_to
+            call.outcome = "transferred"
+        elif status_override is not None:
             call.status = status_override
         elif call.status not in _TERMINAL_STATUSES:
             call.status = "disconnected"
@@ -264,33 +335,43 @@ async def record_agent_assessment(
         await session.commit()
 
 
-async def start_outbound_call(customer_id: uuid.UUID) -> Call:
-    """Look up the customer, create a `calls` row, and dial via Twilio.
+async def start_outbound_call(
+    customer_id: uuid.UUID,
+    profile_id: uuid.UUID | None = None,
+    campaign_id: uuid.UUID | None = None,
+) -> Call:
+    """Look up the customer, create a `calls` row, pick a caller ID from the
+    number pool, and dial via Twilio.
 
-    Shared by the legacy `POST /call` endpoint and the dashboard's
-    `POST /api/calls` — both are thin wrappers around this. Raises
-    `CustomerNotFound` or `TwilioCallFailed`; callers translate these to the
-    appropriate HTTP response. A failure is also recorded on the call row
+    Shared by `POST /call`, the dashboard's `POST /api/calls` and the
+    campaign dialer. `profile_id` overrides the customer's profile (campaigns).
+    Raises `CustomerNotFound` or `TwilioCallFailed`; callers translate these to
+    the appropriate HTTP response. A failure is also recorded on the call row
     (status=failed + a call event) so it shows up in the dashboard.
     """
     customer = await get_customer(customer_id)
-    profile = await profiles_service.resolve_profile(customer.profile_id)
+    profile = await profiles_service.resolve_profile(profile_id or customer.profile_id)
     call = await create_call(
-        customer.id, direction="outbound", channel="phone", profile_id=profile.id
+        customer.id,
+        direction="outbound",
+        channel="phone",
+        profile_id=profile.id,
+        to_number=customer.phone,
+        campaign_id=campaign_id,
     )
 
     async def fail(event_type: str, reason: str) -> TwilioCallFailed:
         logger.error("Outbound call %s failed: %s", call.id, reason)
         await events_service.record(call.id, event_type, reason)
         await set_status(call.id, "failed", error_reason=reason)
-        return TwilioCallFailed(reason)
+        return TwilioCallFailed(reason, call.id)
 
     if not is_valid_e164(customer.phone):
         raise await fail(
             "invalid_number",
             f"'{customer.phone}' is not a valid E.164 phone number (e.g. +919876543210).",
         )
-    if not (config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN and config.TWILIO_PHONE_NUMBER):
+    if not (config.TWILIO_ACCOUNT_SID and config.TWILIO_AUTH_TOKEN):
         raise await fail(
             "provider_error",
             "Twilio is not configured (TWILIO_* env vars are empty). Use 'Browser call' "
@@ -303,13 +384,23 @@ async def start_outbound_call(customer_id: uuid.UUID) -> Call:
             "public tunnel/deploy host (e.g. abc123.ngrok-free.app).",
         )
 
+    picked = await numbers_service.pick_outbound_number(profile.id)
+    if picked is None:
+        raise await fail(
+            "provider_error",
+            "No caller number available: add an outbound-enabled number under Phone numbers, "
+            "or set TWILIO_PHONE_NUMBER.",
+        )
+    from_number, phone_number_id = picked
+    await _set_caller(call.id, from_number, phone_number_id)
+
     try:
         # The Twilio SDK is synchronous — run it off the event loop so a slow
         # API round-trip doesn't stall live audio for calls already running.
         twilio_call = await asyncio.to_thread(
             config.twilio_client.calls.create,
             to=customer.phone,
-            from_=config.TWILIO_PHONE_NUMBER,
+            from_=from_number,
             url=f"{config.HTTP_SCHEME}://{config.SERVER_HOST}/voice?call_id={call.id}",
             status_callback=f"{config.HTTP_SCHEME}://{config.SERVER_HOST}/call-status",
             status_callback_event=["initiated", "ringing", "answered", "completed"],
@@ -324,15 +415,28 @@ async def start_outbound_call(customer_id: uuid.UUID) -> Call:
 
     await set_twilio_sid(call.id, twilio_call.sid)
     call.twilio_call_sid = twilio_call.sid
-    await events_service.record(call.id, "call_initiated", f"Twilio SID {twilio_call.sid}")
+    await events_service.record(
+        call.id, "call_initiated", f"Twilio SID {twilio_call.sid} from {from_number}"
+    )
 
     logger.info(
-        "Outbound call initiated: call_id=%s  SID=%s  to=%s",
+        "Outbound call initiated: call_id=%s  SID=%s  from=%s  to=%s",
         call.id,
         twilio_call.sid,
+        from_number,
         customer.phone,
     )
     return call
+
+
+async def _set_caller(call_id: uuid.UUID, from_number: str, phone_number_id: uuid.UUID | None) -> None:
+    async with get_session_factory()() as session:
+        call = await session.get(Call, call_id)
+        if call is None:
+            return
+        call.from_number = from_number
+        call.phone_number_id = phone_number_id
+        await session.commit()
 
 
 async def start_browser_call(customer_id: uuid.UUID) -> Call:
@@ -354,6 +458,16 @@ async def start_browser_call(customer_id: uuid.UUID) -> Call:
 async def get_call(call_id: uuid.UUID) -> Call | None:
     async with get_session_factory()() as session:
         return await session.get(Call, call_id)
+
+
+async def redirect_phone_call(twilio_call_sid: str, twiml: str) -> bool:
+    """Replace a live call's TwiML (ends its media stream). False on failure."""
+    try:
+        await asyncio.to_thread(config.twilio_client.calls(twilio_call_sid).update, twiml=twiml)
+        return True
+    except Exception:
+        logger.exception("Could not redirect Twilio call %s", twilio_call_sid)
+        return False
 
 
 async def hang_up_phone_call(twilio_call_sid: str, apology: str | None = None) -> None:
@@ -385,6 +499,8 @@ async def list_calls(
     outcome: str | None = None,
     channel: str | None = None,
     profile_id: uuid.UUID | None = None,
+    direction: str | None = None,
+    campaign_id: uuid.UUID | None = None,
 ) -> tuple[list[tuple[Call, Customer, CallSummary | None]], int]:
     """Returns `(rows, total)`, where each row is `(Call, Customer,
     CallSummary | None)`. All filters combine with AND semantics."""
@@ -424,6 +540,10 @@ async def list_calls(
             conditions.append(Call.channel == channel)
         if profile_id is not None:
             conditions.append(Call.profile_id == profile_id)
+        if direction is not None:
+            conditions.append(Call.direction == direction)
+        if campaign_id is not None:
+            conditions.append(Call.campaign_id == campaign_id)
 
         for condition in conditions:
             base_query = base_query.where(condition)
@@ -479,6 +599,7 @@ def profile_to_dict(profile) -> dict:  # noqa: ANN001
         "greeting": profile.greeting,
         "language": profile.language,
         "fields": profile.fields,
+        "transfer_number": profile.transfer_number,
     }
 
 
@@ -511,6 +632,9 @@ async def load_call_context(call_id: uuid.UUID) -> dict | None:
     }
     return {
         "collected": prefilled,
+        "direction": call.direction or "outbound",
+        "from_number": call.from_number,
+        "to_number": call.to_number,
         "customer": {
             "name": known_name,
             "company": customer.company,
@@ -532,3 +656,21 @@ async def profile_names() -> dict[uuid.UUID, str]:
     async with get_session_factory()() as session:
         result = await session.execute(select(BusinessProfile.id, BusinessProfile.name))
         return {row.id: row.name for row in result}
+
+
+async def transfer_context(call_id: uuid.UUID) -> tuple[str | None, str | None]:
+    """(customer name, the agent's hand-off summary) for the transfer whisper."""
+    from audiocall.db.models import CallEvent
+
+    async with get_session_factory()() as session:
+        call = await session.get(Call, call_id, options=[selectinload(Call.customer)])
+        if call is None:
+            return None, None
+        name = call.customer.name if call.customer.name != "Unknown caller" else None
+        summary = await session.scalar(
+            select(CallEvent.detail)
+            .where(CallEvent.call_id == call_id, CallEvent.event_type == "transfer_requested")
+            .order_by(CallEvent.created_at.desc())
+            .limit(1)
+        )
+        return name, summary

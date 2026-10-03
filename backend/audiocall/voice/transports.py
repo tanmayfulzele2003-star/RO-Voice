@@ -160,6 +160,19 @@ class TwilioTransport:
             await calls_service.hang_up_phone_call(self.twilio_call_sid, apology=message)
         await self._close()
 
+    async def transfer(self, twiml: str) -> bool:
+        """Hand the live call to new TwiML (a <Dial> to a person). Twilio
+        ends this media stream itself; the later hang_up() then only closes
+        our socket and must not end the call over REST."""
+        from audiocall.services import calls_service
+
+        if not self.twilio_call_sid or self.remote_ended:
+            return False
+        if not await calls_service.redirect_phone_call(self.twilio_call_sid, twiml):
+            return False
+        self.remote_ended = True
+        return True
+
     async def _close(self) -> None:
         try:
             await self.ws.close()
@@ -230,6 +243,10 @@ class BrowserTransport:
     async def abort(self, message: str = APOLOGY) -> None:
         await self._send(json_={"type": "error", "message": message})
         await self._close()
+
+    async def transfer(self, twiml: str) -> bool:
+        """No phone line to redirect (the agent's tool reports this too)."""
+        return False
 
     async def _send(self, *, bytes_: bytes | None = None, json_: dict | None = None) -> None:
         if self._closed:

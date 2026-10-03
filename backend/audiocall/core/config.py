@@ -76,4 +76,21 @@ TWILIO_VALIDATE_SIGNATURE: bool = (
 CALL_RATE_LIMIT_MAX = 5
 CALL_RATE_LIMIT_WINDOW_SECONDS = 60
 
+# ── Concurrency & campaign dialer ────────────────────────────────────────────
+# Phone calls allowed at once across manual calls, campaigns and inbound
+# calls. Bound by Twilio CPS / concurrency and the Gemini Live concurrent
+# session quota of your plan.
+MAX_CONCURRENT_CALLS = int(os.environ.get("MAX_CONCURRENT_CALLS", "5"))
+# The dialer runs inside the API process. Disable it on extra replicas if you
+# want exactly one dialer (several are safe — contacts are claimed with SKIP
+# LOCKED — they just share the work).
+DIALER_ENABLED: bool = os.environ.get("DIALER_ENABLED", "true").lower() == "true"
+DIALER_INTERVAL_SECONDS = float(os.environ.get("DIALER_INTERVAL_SECONDS", "3"))
+# Twilio's default outbound limit is 1 call per second per account.
+DIAL_CALLS_PER_SECOND = float(os.environ.get("DIAL_CALLS_PER_SECOND", "1"))
+
+# ── Human transfer ───────────────────────────────────────────────────────────
+# How long the human's phone rings before the caller hears the fallback.
+TRANSFER_RING_TIMEOUT_SECONDS = int(os.environ.get("TRANSFER_RING_TIMEOUT_SECONDS", "25"))
+
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)

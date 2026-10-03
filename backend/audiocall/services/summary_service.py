@@ -173,7 +173,9 @@ async def persist_analysis(call_id: uuid.UUID, analysis: CallAnalysis) -> None:
         summary.lead_status = analysis.lead_status
 
         call = await session.get(Call, call_id)
-        if call is not None and call.status != "failed":
+        # A handed-off call's outcome comes from the transfer (transferred /
+        # callback), not from the AI's half of the conversation.
+        if call is not None and call.status != "failed" and call.transferred_to is None:
             call.outcome = outcome_from_analysis(analysis.lead_status)
 
         await session.commit()
